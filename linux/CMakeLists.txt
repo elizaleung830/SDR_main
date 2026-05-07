@@ -39,10 +39,13 @@ if(PUPRADAR_USE_LIBUSB)
     target_link_libraries(pupradar_usb PUBLIC PkgConfig::LIBUSB pupradar_core)
 endif()
 
-# -------------------------------------------------------------------- executable
+# -------------------------------------------------------------------- executables
 if(PUPRADAR_USE_LIBUSB)
     add_executable(pupradar_capture src/main.cpp)
     target_link_libraries(pupradar_capture PRIVATE pupradar_usb pupradar_core)
+
+    add_executable(pupradar_board_info src/board_info.cpp)
+    target_link_libraries(pupradar_board_info PRIVATE pupradar_usb pupradar_core)
 endif()
 
 # -------------------------------------------------------------------- tests

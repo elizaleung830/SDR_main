@@ -169,4 +169,36 @@ buildSawtoothPllCommands(double f_low_hz, double f_high_hz, int sweep_time_idx) 
     return cmds;
 }
 
+BoardInfo decodeBoardInfo(const std::vector<std::uint16_t>& words) {
+    BoardInfo info{};
+    if (words.size() < 4 || words[0] != 0xFA05u) {
+        return info;  // valid stays false
+    }
+    info.valid        = true;
+    // word[1]: dec2hex gives ABCD; chars 3-4 = low byte
+    info.freq_band    = static_cast<std::uint8_t>(words[1] & 0xFF);
+    // word[2]: char 1 = (w>>12)&0xF, char 2 = (w>>8)&0xF, chars 3-4 = w&0xFF
+    info.num_tx       = static_cast<std::uint8_t>((words[2] >> 12) & 0xFu);
+    info.num_rx       = static_cast<std::uint8_t>((words[2] >>  8) & 0xFu);
+    info.antenna_type = static_cast<std::uint8_t>(words[2] & 0xFF);
+    // word[3]: char 2 = (w>>8)&0xF
+    info.version      = static_cast<std::uint8_t>((words[3] >>  8) & 0xFu);
+    // GUI line 2684
+    info.modelcode    = static_cast<std::uint32_t>(info.freq_band)    * 1000000u
+                      + static_cast<std::uint32_t>(info.num_tx)       *  100000u
+                      + static_cast<std::uint32_t>(info.num_rx)       *   10000u
+                      + static_cast<std::uint32_t>(info.antenna_type) *     100u
+                      + static_cast<std::uint32_t>(info.version);
+    // GUI lines 2687-2699
+    switch (info.modelcode) {
+        case  24240100u: info.model_name = "PUP_DU24P_T2R4";    break;
+        case 240240100u: info.model_name = "PUP_EN24P_T2R4";    break;
+        case 240240200u: info.model_name = "PUP_EN24C_T2R4 V1"; break;
+        case 240240202u: info.model_name = "PUP_EN24C_T2R4 V2"; break;
+        case 240140201u: info.model_name = "PUP_EN24C_T1R4";    break;
+        default:         info.model_name = "unknown (Needs Refresh)"; break;
+    }
+    return info;
+}
+
 }  // namespace pupradar

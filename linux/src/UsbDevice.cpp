@@ -3,6 +3,7 @@
 #include <libusb-1.0/libusb.h>
 
 #include <chrono>
+#include <iomanip>
 #include <sstream>
 #include <thread>
 
@@ -14,6 +15,28 @@ namespace {
     std::ostringstream oss;
     oss << what << ": " << libusb_error_name(rc) << " (" << rc << ")";
     throw UsbError(oss.str());
+}
+
+// Returns a human-readable list of every USB device currently visible,
+// e.g. "04B4:00F3, 1D6B:0002". Used to self-diagnose renumeration failures.
+std::string listVisibleDevices(libusb_context* ctx) {
+    libusb_device** list = nullptr;
+    ssize_t cnt = libusb_get_device_list(ctx, &list);
+    if (cnt < 0) return "(could not enumerate)";
+
+    std::ostringstream oss;
+    bool first = true;
+    for (ssize_t i = 0; i < cnt; ++i) {
+        libusb_device_descriptor d{};
+        if (libusb_get_device_descriptor(list[i], &d) != 0) continue;
+        if (!first) oss << ", ";
+        oss << std::hex << std::uppercase
+            << std::setw(4) << std::setfill('0') << d.idVendor << ':'
+            << std::setw(4) << std::setfill('0') << d.idProduct;
+        first = false;
+    }
+    libusb_free_device_list(list, 1);
+    return first ? "(none)" : oss.str();
 }
 
 libusb_device_handle* tryOpen(libusb_context* ctx,
@@ -150,7 +173,18 @@ void UsbDevice::reopenAfterRenumeration(const VidPid* candidates,
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    throw UsbError("reopenAfterRenumeration: device did not reappear in time");
+    std::ostringstream oss;
+    oss << "reopenAfterRenumeration: device did not reappear within "
+        << timeout_ms << " ms.\n"
+        << "  Searched for:";
+    for (std::size_t i = 0; i < num_candidates; ++i) {
+        oss << " " << std::hex << std::uppercase
+            << std::setw(4) << std::setfill('0') << candidates[i].vid << ':'
+            << std::setw(4) << std::setfill('0') << candidates[i].pid;
+    }
+    oss << "\n  Currently visible: " << listVisibleDevices(ctx_)
+        << "\n  Hint: pass the correct VID:PID above via --post-fw-vid / --post-fw-pid";
+    throw UsbError(oss.str());
 }
 
 }  // namespace pupradar

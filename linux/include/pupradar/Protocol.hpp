@@ -77,4 +77,22 @@ int    samplesPerSweep(int sweep_time_idx, int sn_idx, int num_rx);
 int    txCount(std::uint8_t tx_mask);
 int    rxCount(std::uint8_t rx_mask);
 
+// Board-info fields decoded from the 0xFA response (GUI lines 2675-2699).
+// All field names match the MATLAB handle names exactly.
+struct BoardInfo {
+    bool          valid        = false;  // false if signature != FA05 or fewer than 4 words
+    std::uint8_t  freq_band    = 0;     // GUI line 2677: hex2dec(word[1], chars 3-4) = word[1] & 0xFF
+    std::uint8_t  num_tx       = 0;     // GUI line 2679: hex2dec(word[2], char 1)    = (word[2] >> 12) & 0xF
+    std::uint8_t  num_rx       = 0;     // GUI line 2680: hex2dec(word[2], char 2)    = (word[2] >> 8)  & 0xF
+    std::uint8_t  antenna_type = 0;     // GUI line 2681: hex2dec(word[2], chars 3-4) = word[2] & 0xFF
+    std::uint8_t  version      = 0;     // GUI line 2682: hex2dec(word[3], char 2)    = (word[3] >> 8)  & 0xF
+    std::uint32_t modelcode    = 0;     // GUI line 2684: freq_band*1e6 + num_tx*1e5 + num_rx*1e4 + antenna_type*100 + version
+    const char*   model_name   = "";    // GUI lines 2687-2699 model string
+};
+
+// Decode a raw board-info word vector (as returned by RadarSession::lastBoardInfo())
+// into a BoardInfo struct. Returns BoardInfo{valid=false} if the FA05 signature is
+// absent or fewer than 4 words are present.
+BoardInfo decodeBoardInfo(const std::vector<std::uint16_t>& words);
+
 }  // namespace pupradar

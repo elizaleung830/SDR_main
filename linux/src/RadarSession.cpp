@@ -20,14 +20,24 @@ constexpr std::uint8_t kCtrlIn    = 0xC0;  // vendor, device→host, recipient=d
 constexpr unsigned int kCtrlTimeoutMs = 1000;
 constexpr unsigned int kBulkOutTimeoutMs = 1000;
 
-// 0xFA00 board-info read length, matching MATLAB DataLength = 512 + 2048
+// GUI line 2672: DataLength = 512 + 2048
 constexpr std::size_t kBoardInfoReadBytes = 512 + 2048;
-// Offset (in bytes) of useful info inside the board-info read, per GUI line 2674
+// GUI line 2674: PUPradarBoardInfo(1025:1100) — word 1025 (1-based) = byte 2048
 constexpr std::size_t kBoardInfoUsefulOffsetBytes = 2048;
-// We expose 32 bytes (16 uint16 words) of useful info — the GUI reads 76 words
-// but only the first ~5 carry semantic meaning. 32 bytes is enough headroom.
+// GUI reads 76 words (1025:1100) but only words 0-4 have meaning:
+//   word 0 — FA05 signature (checked at GUI line 2675)
+//   word 1 — FrequencyBand  (GUI line 2677)
+//   word 2 — Num_Tx, Num_Rx, AntennaType (GUI line 2679-2681)
+//   word 3 — Version        (GUI line 2682-2683)
+// 32 bytes = 16 words gives comfortable headroom over those 4-5 semantic words.
+// Hardware note: the device may return fewer bytes than kBoardInfoReadBytes;
+// the decode in requestBoardInfo() is therefore bounded by what actually arrived.
 constexpr std::size_t kBoardInfoExposedBytes = 32;
 
+/**
+ * @brief Returns the current UTC wall-clock time as an ISO-8601 string.
+ * @return Timestamp in the form "YYYY-MM-DDTHH:MM:SSZ" (second resolution).
+ */
 std::string isoTimestampUtcNow() {
     auto t  = std::chrono::system_clock::now();
     auto tt = std::chrono::system_clock::to_time_t(t);
@@ -44,9 +54,23 @@ std::string isoTimestampUtcNow() {
 
 }  // namespace
 
+/**
+ * @brief Constructs a RadarSession bound to a USB backend and a firmware image.
+ * @param usb               Reference to the USB backend (lifetime must exceed this object).
+ * @param firmware_hex_path Path to the FX3 firmware Intel HEX file (e.g. "SDR_USB_FW.hex").
+ */
 RadarSession::RadarSession(IUsbBackend& usb, std::string firmware_hex_path)
     : usb_(usb), fw_path_(std::move(firmware_hex_path)) {}
 
+/**
+ * @brief Packs an opcode/parameter pair into a 512-byte bulk-OUT packet and sends it to EP2.
+ *
+ * The MCU interprets only the first 16-bit little-endian word (opcode | param << 8), but the
+ * full 512-byte max-packet must be sent to avoid FX2LP framing issues observed on some hosts.
+ * @param opcode    Command opcode byte (see pupradar::opcode namespace in Protocol.hpp).
+ * @param parameter Command parameter byte (semantics depend on opcode).
+ * @throws std::runtime_error if fewer bytes than the full 512-byte packet are transferred.
+ */
 void RadarSession::sendCommand(std::uint8_t opcode, std::uint8_t parameter) {
     auto pkt = makeCommandPacket(opcode, parameter);
     std::size_t n = usb_.bulkWrite(kEpOutBulk, pkt.data(), pkt.size(),
@@ -59,6 +83,19 @@ void RadarSession::sendCommand(std::uint8_t opcode, std::uint8_t parameter) {
     }
 }
 
+/**
+ * @brief Downloads the Intel HEX firmware image into FX3 RAM via the Cypress 0xA0 loader protocol.
+ *
+ * Sequence mirrors usbdownload.cpp:
+ *   1. Read CPUCS register (0xE600), set bit 0 to hold the 8051 in reset.
+ *   2. Write each HEX data record to its target address via control transfers.
+ *   3. Clear CPUCS bit 0 to release reset — the 8051 begins executing firmware.
+ *
+ * After this returns the chip re-enumerates under a new VID/PID. Callers must invoke
+ * IUsbBackend::reopenAfterRenumeration() before issuing any further transfers.
+ * @throws std::runtime_error if the HEX file contains no data records or if any
+ *         control transfer completes with fewer bytes than expected.
+ */
 void RadarSession::downloadFirmware() {
     auto records = parseIntelHexFile(fw_path_);
     if (records.empty()) {
@@ -95,20 +132,40 @@ void RadarSession::downloadFirmware() {
                          &cpucs, 1, kCtrlTimeoutMs);
 }
 
+/**
+ * @brief Sends the 0xFA board-info request and parses the response into last_board_info_.
+ *
+ * Mirrors the GUI at line 2674: sends opcode kBoardInfoRequest, bulk-reads
+ * kBoardInfoReadBytes (512 + 2048) bytes from EP6, then extracts up to
+ * kBoardInfoExposedBytes starting at kBoardInfoUsefulOffsetBytes (2048),
+ * decoded as little-endian uint16 words.
+ *
+ * Hardware note: the device may return fewer than kBoardInfoReadBytes bytes.
+ * The observed minimum is ~2058 (useful_offset + 10), which covers all 5
+ * semantically meaningful words from the MATLAB GUI (lines 2675-2683).
+ * The decode is therefore bounded by however many bytes actually arrived,
+ * not by the nominal kBoardInfoExposedBytes.
+ *
+ * @throws std::runtime_error if the bulk read returns fewer than
+ *         kBoardInfoUsefulOffsetBytes + 2 bytes (less than 1 uint16 word).
+ */
 void RadarSession::requestBoardInfo() {
     sendCommand(opcode::kBoardInfoRequest, 0x00);
     std::vector<std::uint8_t> buf(kBoardInfoReadBytes, 0);
     std::size_t n = usb_.bulkRead(kEpInBulk, buf.data(), buf.size(),
                                    /*timeout_ms*/ 2000);
-    if (n < kBoardInfoUsefulOffsetBytes + kBoardInfoExposedBytes) {
+    if (n < kBoardInfoUsefulOffsetBytes + 2) {
         std::ostringstream oss;
-        oss << "Board info: short read " << n << " < expected "
-            << (kBoardInfoUsefulOffsetBytes + kBoardInfoExposedBytes);
+        oss << "Board info: short read " << n
+            << " bytes (need at least " << (kBoardInfoUsefulOffsetBytes + 2) << ")";
         throw std::runtime_error(oss.str());
     }
+    // Decode however many complete uint16 words arrived, up to kBoardInfoExposedBytes.
+    const std::size_t avail_bytes = n - kBoardInfoUsefulOffsetBytes;
+    const std::size_t decode_bytes = (std::min(kBoardInfoExposedBytes, avail_bytes) / 2) * 2;
     last_board_info_.clear();
-    last_board_info_.reserve(kBoardInfoExposedBytes / 2);
-    for (std::size_t i = 0; i < kBoardInfoExposedBytes; i += 2) {
+    last_board_info_.reserve(decode_bytes / 2);
+    for (std::size_t i = 0; i < decode_bytes; i += 2) {
         std::uint8_t lo = buf[kBoardInfoUsefulOffsetBytes + i];
         std::uint8_t hi = buf[kBoardInfoUsefulOffsetBytes + i + 1];
         last_board_info_.push_back(
@@ -116,6 +173,26 @@ void RadarSession::requestBoardInfo() {
     }
 }
 
+/**
+ * @brief Full device bring-up: open pre-firmware device, download firmware, wait for
+ *        re-enumeration, reclaim the interface, and fetch board info.
+ *
+ * Mirrors PUPradar_initiating() in the MATLAB GUI. Steps:
+ *   1. Open the unprogrammed FX2LP (VID 0x04B4 / PID 0x8613).
+ *   2. Claim interface 0, set alternate setting 1 (benign if the descriptor lacks it).
+ *   3. Download firmware via the Cypress 0xA0 loader (downloadFirmware()).
+ *   4. Wait for the chip to re-enumerate under one of post_fw_candidates.
+ *   5. Claim interface 0 and set alternate setting 1 again (now required for bulk EPs).
+ *   6. Request board info (requestBoardInfo()) — result available via lastBoardInfo().
+ *
+ * @param post_fw_candidates Non-empty list of (VID, PID) pairs the chip may present after
+ *                           the firmware boots. Tried in order until one opens or the timeout
+ *                           elapses.
+ * @param reenum_timeout_ms  Maximum time in milliseconds to wait for re-enumeration
+ *                           (default: 5000 ms).
+ * @throws std::invalid_argument if post_fw_candidates is empty.
+ * @throws UsbError or std::runtime_error on any USB failure.
+ */
 void RadarSession::initialize(
         const std::vector<IUsbBackend::VidPid>& post_fw_candidates,
         unsigned int reenum_timeout_ms) {
@@ -126,6 +203,7 @@ void RadarSession::initialize(
     // Pre-firmware open
     usb_.open(kPreFirmwareVid, kPreFirmwarePid);
     usb_.claimInterface(kInterfaceNumber);
+    
     // Set alt 1 — this matches PUPradar_initiating ordering. On the
     // unprogrammed FX2LP this is benign because the default descriptor
     // exposes a single interface 0 with one alt setting.
@@ -148,6 +226,17 @@ void RadarSession::initialize(
     requestBoardInfo();
 }
 
+/**
+ * @brief Pushes a full set of FMCW parameters to the radar over USB.
+ *
+ * Sends commands in the same order as the MATLAB GUI (SetActiveParameters →
+ * Send_Basic_Parameter → Send_PLL_Sawtooth): modulation, sweep time index, sampling
+ * number index, Tx mask, Rx mask, then all PLL register bytes for the sawtooth ramp.
+ * @param cfg Capture configuration describing the desired waveform. The MVP requires
+ *            cfg.modulation == Modulation::Sawtooth; CW is deferred.
+ * @throws std::invalid_argument if cfg.modulation is not Modulation::Sawtooth.
+ * @throws std::runtime_error on any USB write failure (propagated from sendCommand).
+ */
 void RadarSession::configure(const CaptureConfig& cfg) {
     if (cfg.modulation != Modulation::Sawtooth) {
         throw std::invalid_argument("MVP supports Sawtooth only (CW deferred)");
@@ -173,6 +262,24 @@ void RadarSession::configure(const CaptureConfig& cfg) {
     for (const auto& c : pll) sendCommand(c.opcode, c.param);
 }
 
+/**
+ * @brief Bulk-reads raw IQ data from EP6 for cfg.duration_s seconds, forwarding each
+ *        chunk to sink.
+ *
+ * Buffer sizing mirrors the GUI at line 2730: (kNumSweepsPerRead=64 + 40) sweeps worth of
+ * raw bytes, rounded up to a 512-byte boundary, plus 4096 bytes of padding. The capture
+ * loop runs until std::chrono::steady_clock exceeds the computed deadline; zero-length
+ * reads are silently skipped. No DSP is performed — this is a capture-only MVP.
+ *
+ * @param cfg  Capture configuration used for buffer sizing, run duration, and bulk timeout.
+ *             Must match the configuration previously sent via configure().
+ * @param sink Callback invoked with each non-empty bulk read chunk (raw pointer into an
+ *             internal buffer, valid only for the duration of the call).
+ * @return CaptureMetadata populated with echoed config values, derived sample rate (fs_hz),
+ *         sweep time, actual capture duration, byte and read counts, last board info words,
+ *         firmware path, and a UTC ISO-8601 timestamp.
+ * @throws std::runtime_error on a USB error during bulk transfer (propagated from bulkRead).
+ */
 CaptureMetadata RadarSession::captureIq(const CaptureConfig& cfg,
                                          const IqSink& sink) {
     const int n_rx = rxCount(cfg.rx_mask);
@@ -236,6 +343,11 @@ CaptureMetadata RadarSession::captureIq(const CaptureConfig& cfg,
     return md;
 }
 
+/**
+ * @brief Releases all USB interfaces and closes the device handle.
+ *
+ * After this call the RadarSession is not usable again without a fresh call to initialize().
+ */
 void RadarSession::shutdown() {
     usb_.close();
 }

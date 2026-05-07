@@ -6,7 +6,7 @@
 //
 // Usage:
 //   pupradar_capture --duration 5 --out /tmp/cap [--firmware /path/to.hex]
-//                    [--post-fw-vid 0x04B4 --post-fw-pid 0x1004]
+//                    [--post-fw-vid 0x04B4 --post-fw-pid 0x8613]
 //                    [--fc-low 24.0e9 --fc-high 24.25e9]
 //                    [--sweep-time 2 --samp-num 1 --tx 1 --rx 1]
 //                    [--reenum-timeout-ms 5000 --bulk-timeout-ms 2000]
@@ -16,6 +16,7 @@
 // post-firmware VID/PID and pass them via --post-fw-vid/--post-fw-pid.
 
 #include "pupradar/IqWriter.hpp"
+#include "pupradar/Protocol.hpp"
 #include "pupradar/RadarSession.hpp"
 #include "pupradar/UsbDevice.hpp"
 
@@ -44,7 +45,7 @@ void printUsage(const char* prog) {
         "  --tx <mask>               Tx mask: 1=Tx1, 2=Tx2, 3=both (default 1)\n"
         "  --rx <mask>               Rx mask: 1/2/4/8 single, 3=Rx12, 12=Rx34, 15=All (default 1)\n"
         "  --post-fw-vid <0xNNNN>    Post-firmware VID (default 0x04B4)\n"
-        "  --post-fw-pid <0xNNNN>    Post-firmware PID (default 0x1004)\n"
+        "  --post-fw-pid <0xNNNN>    Post-firmware PID (default 0x8613)\n"
         "  --post-fw-vid2 <0xNNNN>   Optional second VID candidate\n"
         "  --post-fw-pid2 <0xNNNN>   Optional second PID candidate\n"
         "  --reenum-timeout-ms <ms>  Re-enumeration wait after firmware load (default 5000)\n"
@@ -114,7 +115,7 @@ int main(int argc, char** argv) try {
     std::vector<pupradar::IUsbBackend::VidPid> post_fw;
     post_fw.push_back({
         static_cast<std::uint16_t>(args.getInt("post-fw-vid", 0x04B4)),
-        static_cast<std::uint16_t>(args.getInt("post-fw-pid", 0x1004))
+        static_cast<std::uint16_t>(args.getInt("post-fw-pid", 0x8613))
     });
     if (args.has("post-fw-vid2") && args.has("post-fw-pid2")) {
         post_fw.push_back({
@@ -137,11 +138,21 @@ int main(int argc, char** argv) try {
 
     std::cout << "[pupradar] initializing (open → claim → firmware → reopen)…\n";
     session.initialize(post_fw, reenum_ms);
-    std::cout << "[pupradar] board info (uint16 words, hex): ";
-    for (auto w : session.lastBoardInfo()) {
-        std::printf("%04X ", w);
-    }
+
+    std::printf("[pupradar] board info (uint16 words, hex): ");
+    for (auto w : session.lastBoardInfo()) std::printf("%04X ", w);
     std::printf("\n");
+
+    const pupradar::BoardInfo info = pupradar::decodeBoardInfo(session.lastBoardInfo());
+    if (info.valid) {
+        std::printf("[pupradar] model:        %s\n",  info.model_name);
+        std::printf("[pupradar] freq_band:    %u  num_tx: %u  num_rx: %u\n",
+                    info.freq_band, info.num_tx, info.num_rx);
+        std::printf("[pupradar] antenna_type: %u  version: %u\n",
+                    info.antenna_type, info.version);
+    } else {
+        std::printf("[pupradar] warning: FA05 signature not found in board info\n");
+    }
 
     std::cout << "[pupradar] configuring sawtooth FMCW…\n";
     session.configure(cfg);
