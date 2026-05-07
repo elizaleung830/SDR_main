@@ -3,7 +3,10 @@ fid = fopen("C:\Users\eliza\SDR_main\SDR_main\temp\cap.bin", 'r');
 
 % 2. Read the data as 16-bit integers
 % Using '*int16' keeps the data type as int16 in MATLAB (saves memory)
-raw = fread(fid, '*int16'); 
+raw = fread(fid, 'uint16'); 
+% Now the standard header removal logic will work
+headerIndices = raw(raw >= 49152);
+raw(headerIndices) = raw(headerIndices) - 49152;
 
 % 3. Close the file
 fclose(fid);
@@ -12,62 +15,13 @@ fclose(fid);
 % Note: MATLAB uses 1-based indexing
 I = double(raw(1:2:end)); 
 Q = double(raw(2:2:end));
+min_len = min(length(I), length(Q));
+iq_data = I(1:min_len) + 1i * Q(1:min_len);
 
-iq_data = I + 1i * Q;
-
-% Assuming 'iq_data' is your 1D complex array from the previous step
-
-% --- 1. Define Radar Parameters ---
-% You must define these based on your specific SDR configuration
-N_samples = 256; % Number of fast-time samples per chirp (Range bins)
-N_chirps = 128;  % Number of chirps per frame (Doppler bins)
-
-% Ensure the data length matches an exact number of chirps
-num_total_samples = N_samples * N_chirps;
-if length(iq_data) < num_total_samples
-    warning('Data is shorter than expected frame size. Truncating.');
-    iq_data = iq_data(1:(floor(length(iq_data)/N_samples)*N_samples));
-else
-    iq_data = iq_data(1:num_total_samples);
-end
-
-% --- 2. Reshape into a 2D Matrix (Fast-Time x Slow-Time) ---
-% MATLAB fills column by column. 
-% Rows = fast-time (range), Columns = slow-time (Doppler)
-data_2D = reshape(iq_data, N_samples, []); 
-N_chirps_actual = size(data_2D, 2);
-
-% --- 3. Range FFT (Fast-Time Processing) ---
-% Apply a window function (e.g., Hann) to reduce range sidelobes
-window_range = hann(N_samples); 
-data_windowed_range = data_2D .* window_range; % Applies window to each column
-
-% Compute 1D FFT along the columns (dimension 1)
-range_fft = fft(data_windowed_range, N_samples, 1);
-
-% --- 4. Doppler FFT (Slow-Time Processing) ---
-% Apply a window across the slow-time dimension to reduce Doppler sidelobes
-window_doppler = hann(N_chirps_actual)'; 
-range_fft_windowed = range_fft .* window_doppler; % Applies window to each row
-
-% Compute 1D FFT along the rows (dimension 2)
-% We use fftshift here because Doppler velocities can be positive or negative,
-% so we want zero-Doppler (stationary targets) in the center of the x-axis.
-range_doppler_map = fftshift(fft(range_fft_windowed, N_chirps_actual, 2), 2);
-
-% --- 5. Visualization ---
-% Convert to magnitude and logarithmic scale (dB) for dynamic range viewing
-% Add a small epsilon (1e-10) to prevent log10(0) errors
-rd_mag_db = 20*log10(abs(range_doppler_map) + 1e-10); 
-
-figure;
-% For baseband FMCW radar, range frequencies are positive, so we typically 
-% only plot the first half of the Y-axis. If your data requires it, 
-% you can plot the whole matrix.
-imagesc(rd_mag_db(1:N_samples/2, :)); 
-colormap('jet');
-colorbar;
-xlabel('Doppler Bins (Velocity)');
-ylabel('Range Bins');
-title('Range-Doppler Profile');
-set(gca, 'YDir', 'normal'); % Ensure Range = 0 starts at the bottom
+numSweeps = floor(length(iq_data)/2048);
+iq_data = I(1:numSweeps*2048) + 1i * Q(1:numSweeps*2048);
+fs = 2048000;           % Sampling frequency (2.048 MHz)
+fftSize = 1024;           % Samples per sweep
+T_sweep=0.001;
+BW=250000000;
+[rangeAxis, rangePower] = plotRangeProfile(iq_data,  numSweeps, fs, T_sweep, BW,fftSize);

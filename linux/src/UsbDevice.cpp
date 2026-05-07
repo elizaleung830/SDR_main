@@ -152,8 +152,14 @@ std::size_t UsbDevice::bulkRead(std::uint8_t  ep,
     int actual = 0;
     int rc = libusb_bulk_transfer(handle_, ep, data,
                                   static_cast<int>(length), &actual, timeout_ms);
-    if (rc != 0) throwLibusb("libusb_bulk_transfer (in)", rc);
-    return static_cast<std::size_t>(actual);
+    // On LIBUSB_ERROR_TIMEOUT, actual contains the bytes received before the
+    // deadline — that data is valid. Return it so the capture loop can save it
+    // and retry rather than aborting the entire capture.
+    if (rc == 0 || (rc == LIBUSB_ERROR_TIMEOUT && actual > 0))
+        return static_cast<std::size_t>(actual);
+    if (rc == LIBUSB_ERROR_TIMEOUT)
+        return 0;  // genuine timeout with no data — caller treats 0 as "retry"
+    throwLibusb("libusb_bulk_transfer (in)", rc);
 }
 
 void UsbDevice::reopenAfterRenumeration(const VidPid* candidates,

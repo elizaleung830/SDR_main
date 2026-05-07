@@ -293,9 +293,13 @@ CaptureMetadata RadarSession::captureIq(const CaptureConfig& cfg,
     // padding. NumSweeps batched to 64 to match the GUI's run loop, which is
     // what the firmware's USB FIFO is sized for.
     constexpr int kNumSweepsPerRead = 64;
+    // samplesPerSweep() returns the BASN value, which is already a uint16 count
+    // with I and Q interleaved (both channels). Multiplying by 2 for int16 byte
+    // width is correct; multiplying again for I,Q would double-count and produce
+    // a buffer 2× too large, causing libusb to wait beyond the FX3's burst size.
     const std::size_t bytes_per_sweep =
         static_cast<std::size_t>(samples_per_sweep_per_rx) *
-        2u /* I,Q */ * 2u /* int16 */ *
+        2u /* bytes per uint16 */ *
         static_cast<std::size_t>(n_rx) * static_cast<std::size_t>(n_tx);
     const std::size_t raw_bytes_per_read =
         static_cast<std::size_t>(kNumSweepsPerRead + 40) * bytes_per_sweep;
