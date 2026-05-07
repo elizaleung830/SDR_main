@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "matlab": {
+      "command": "C:\\Users\\eliza\\OneDrive\\Desktop\\SDR\\SDR_main\\matlab-mcp-core-server-win64.exe",
+      "args": []
+    }
+  }
+}
