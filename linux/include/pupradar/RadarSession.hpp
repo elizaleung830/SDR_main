@@ -55,25 +55,25 @@ class RadarSession {
 public:
     RadarSession(IUsbBackend& usb, std::string firmware_hex_path);
 
-    // Full bring-up: enumerate (pre-firmware), claim, download firmware,
-    // wait for re-enumeration, claim again, request board info.
-    // post_fw_candidates: list of (vid,pid) the chip may take after firmware load.
-    // Throws UsbError or std::runtime_error on failure.
+    /// Full bring-up: enumerate (pre-firmware), claim, download firmware,
+    /// wait for re-enumeration, claim again, request board info.
+    /// @param post_fw_candidates List of (vid,pid) the chip may take after firmware load.
+    /// Throws UsbError or std::runtime_error on failure.
     void initialize(const std::vector<IUsbBackend::VidPid>& post_fw_candidates,
                     unsigned int reenum_timeout_ms = 5000);
 
-    // Apply a configuration: send modulation/sweep/sampling/Tx/Rx and PLL regs.
+    /// Apply a configuration: send modulation/sweep/sampling/Tx/Rx and PLL regs.
     void configure(const CaptureConfig& cfg);
 
-    // Bulk-read IQ for `cfg.duration_s` seconds, sinking bytes to `sink`.
-    // Fills out the metadata struct. Does NOT include parsing of the byte
-    // stream — capture-only MVP per PLAN.md.
+    /// Bulk-read IQ for `cfg.duration_s` seconds, sinking bytes to `sink`.
+    /// Fills out the metadata struct. Does NOT include parsing of the byte
+    /// stream — capture-only MVP.
     CaptureMetadata captureIq(const CaptureConfig& cfg, const IqSink& sink);
 
-    // Power-down convenience: release interfaces, close device.
+    /// Power-down convenience: release interfaces, close device.
     void shutdown();
 
-    // For testing / observability.
+    /// For testing / observability.
     const std::vector<std::uint16_t>& lastBoardInfo() const { return last_board_info_; }
 
 private:

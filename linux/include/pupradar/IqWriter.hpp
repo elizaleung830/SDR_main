@@ -1,5 +1,5 @@
-// Writes raw IQ stream to <out>.bin and metadata to <out>.json.
-// The JSON writer is hand-rolled (~50 lines) — no external dep.
+/// Writes raw IQ stream to \<out\>.bin and metadata to \<out\>.json.
+/// The JSON writer is hand-rolled (~50 lines) — no external dep.
 #pragma once
 
 #include "pupradar/RadarSession.hpp"
@@ -12,17 +12,17 @@ namespace pupradar {
 
 class IqWriter {
 public:
-    // out_basename has no extension; .bin and .json are appended.
+    /// @param out_basename Base path with no extension; .bin and .json are appended.
     explicit IqWriter(const std::string& out_basename);
     ~IqWriter();
 
     IqWriter(const IqWriter&)            = delete;
     IqWriter& operator=(const IqWriter&) = delete;
 
-    // IqSink-compatible — feed into RadarSession::captureIq.
+    /// IqSink-compatible — feed into RadarSession::captureIq.
     void write(const std::uint8_t* data, std::size_t length);
 
-    // Closes the binary file (flushes), then writes the JSON sidecar.
+    /// Closes the binary file (flushes), then writes the JSON sidecar.
     void finalize(const CaptureMetadata& md);
 
     const std::string& binPath()  const { return bin_path_; }
@@ -34,7 +34,7 @@ private:
     std::ofstream bin_;
 };
 
-// Exposed for unit tests: serialize metadata as JSON into a string.
+/// Exposed for unit tests: serialize metadata as JSON into a string.
 std::string serializeMetadataJson(const CaptureMetadata& md);
 
 }  // namespace pupradar

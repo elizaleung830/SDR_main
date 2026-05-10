@@ -1,4 +1,4 @@
-// libusb-1.0 implementation of IUsbBackend.
+/// libusb-1.0 implementation of IUsbBackend.
 #pragma once
 
 #include "pupradar/IUsbBackend.hpp"

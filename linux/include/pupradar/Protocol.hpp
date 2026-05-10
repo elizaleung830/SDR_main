@@ -1,6 +1,5 @@
-// Wire protocol constants for the PUP EN24C T2R4 radar.
-// All values cross-checked against Mex src/*.cpp and Matlab src/PUPradarGUI.m.
-// See progress/PROGRESS_01.md for the full derivation.
+/// Wire protocol constants for the PUP EN24C T2R4 radar.
+/// All values cross-checked against Mex src/*.cpp and Matlab src/PUPradarGUI.m.
 #pragma once
 
 #include <array>
@@ -49,36 +48,36 @@ enum class Modulation : std::uint8_t {
     CW       = 3,
 };
 
-// Build a single 512-byte bulk-OUT packet that the MCU will interpret.
-// The MCU reads only the first uint16 (little-endian); we still send a full
-// max-packet because the hardware MEX did, and short writes have historically
-// caused FX2LP framing trouble on some hosts.
+/// Build a single 512-byte bulk-OUT packet that the MCU will interpret.
+/// The MCU reads only the first uint16 (little-endian); we still send a full
+/// max-packet because the hardware MEX did, and short writes have historically
+/// caused FX2LP framing trouble on some hosts.
 std::array<std::uint8_t, kBulkOutPacketBytes>
 makeCommandPacket(std::uint8_t opcode, std::uint8_t parameter);
 
-// Convenience overloads
+/// Convenience overload: build the board-info request packet.
 inline std::array<std::uint8_t, kBulkOutPacketBytes>
 boardInfoPacket() { return makeCommandPacket(opcode::kBoardInfoRequest, 0x00); }
 
-// Sawtooth FMCW PLL register pack — given low/high frequency in Hz and
-// sweep-time index, produces the ordered list of opcode/byte pairs that need
-// to be sent in the same order as the MATLAB Send_PLL_Sawtooth function.
-//
-// The math is the BGT24 mixer ratio (F_PLL = F_Tx / 16) with a 50 MHz reference,
-// 24-bit fractional N. Full derivation in progress/PROGRESS_01.md.
+/// Sawtooth FMCW PLL register pack — given low/high frequency in Hz and
+/// sweep-time index, produces the ordered list of opcode/byte pairs that need
+/// to be sent in the same order as the MATLAB Send_PLL_Sawtooth function.
+///
+/// Math: BGT24 mixer ratio (F_PLL = F_Tx / 16) with a 50 MHz reference,
+/// 24-bit fractional N.
 struct PllCommand { std::uint8_t opcode; std::uint8_t param; };
 std::vector<PllCommand>
 buildSawtoothPllCommands(double f_low_hz, double f_high_hz, int sweep_time_index);
 
-// Translate sweep-time and sampling-number indices to physical values, mirroring
-// SetActiveParameters() in the GUI (lines 1982..2253).
-double sweepTimeFromIndex(int index_1_5);                 // → seconds
+/// Translate sweep-time and sampling-number indices to physical values,
+/// mirroring SetActiveParameters() in the GUI (lines 1982..2253).
+double sweepTimeFromIndex(int index_1_5);   ///< Returns seconds.
 int    samplesPerSweep(int sweep_time_idx, int sn_idx, int num_rx);
 int    txCount(std::uint8_t tx_mask);
 int    rxCount(std::uint8_t rx_mask);
 
-// Board-info fields decoded from the 0xFA response (GUI lines 2675-2699).
-// All field names match the MATLAB handle names exactly.
+/// Board-info fields decoded from the 0xFA response (GUI lines 2675-2699).
+/// All field names match the MATLAB handle names exactly.
 struct BoardInfo {
     bool          valid        = false;  // false if signature != FA05 or fewer than 4 words
     std::uint8_t  freq_band    = 0;     // GUI line 2677: hex2dec(word[1], chars 3-4) = word[1] & 0xFF
@@ -90,9 +89,9 @@ struct BoardInfo {
     const char*   model_name   = "";    // GUI lines 2687-2699 model string
 };
 
-// Decode a raw board-info word vector (as returned by RadarSession::lastBoardInfo())
-// into a BoardInfo struct. Returns BoardInfo{valid=false} if the FA05 signature is
-// absent or fewer than 4 words are present.
+/// Decode a raw board-info word vector (as returned by RadarSession::lastBoardInfo())
+/// into a BoardInfo struct. Returns BoardInfo{valid=false} if the FA05 signature is
+/// absent or fewer than 4 words are present.
 BoardInfo decodeBoardInfo(const std::vector<std::uint16_t>& words);
 
 }  // namespace pupradar
