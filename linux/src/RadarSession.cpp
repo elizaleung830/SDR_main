@@ -318,6 +318,10 @@ CaptureMetadata RadarSession::captureIq(const CaptureConfig& cfg,
     std::size_t reads_done  = 0;
 
     while (clock::now() < t_end) {
+        // Mirror MATLAB GUI: re-send full config before every read so the FX3
+        // re-arms its capture buffer (it fills one batch per configure trigger,
+        // then outputs 0x07FD filler until re-triggered).
+        configure(cfg);
         std::size_t got = usb_.bulkRead(kEpInBulk, buf.data(), buf.size(),
                                          cfg.bulk_timeout_ms);
         if (got == 0) continue;
