@@ -47,6 +47,26 @@ function [rangeAxis, rangePower] = plotRangeProfile(iqArray1D, numSweeps, fs, T_
     pMin = min(rangePowerRaw);
     rangePower = (rangePowerRaw - pMin) / (pMax - pMin) * 45 + 5;
 
+    %% 4b. Find Time Delay and Range of the strongest target
+    % Find the index of the highest power peak
+    [~, peakIndex] = max(rangePowerRaw);
+    
+    % 1. Calculate the beat frequency of that specific FFT bin
+    frequencyBinWidth = fs / fftSize;
+    beatFrequency = (peakIndex - 1) * frequencyBinWidth;
+    
+    % 2. Calculate the Time Delay (tau)
+    timeDelay = beatFrequency * (T_sweep / BW);
+    
+    % 3. Calculate Range (just to verify it matches your plot axis)
+    c = 3e8;
+    targetRange = (timeDelay * c) / 2;
+    
+    % Print the results to the console
+    fprintf('Target Beat Frequency: %.2f Hz\n', beatFrequency);
+    fprintf('Signal Time Delay:   %.3e seconds\n', timeDelay);
+    fprintf('Calculated Range:    %.2f meters\n', targetRange);
+
     %% 5. Range Axis Mapping
     c = 3e8; 
     LARR = 1.4; % Calibration Range Ratio from source [cite: 53]
@@ -57,23 +77,23 @@ function [rangeAxis, rangePower] = plotRangeProfile(iqArray1D, numSweeps, fs, T_
     % Convert frequency to range [cite: 86]
     rangeAxis = freqAxis * T_sweep / (2 * BW) * LARR * c;
 
-    %% 6. Visualization (Strictly matched to GUI Source)
-    figure('Color', 'w', 'Name', 'SDR Range Profile');
-    
-    % The source plots a solid green line with LineWidth 1 
-    plot(rangeAxis, rangePower, 'Color', [0 1 0], 'LineWidth', 1);
-    
-    % The source uses a black background with specific dark green dashed grid lines [cite: 88, 89]
-    set(gca, 'Color', 'k', ...
-             'XGrid', 'on', 'YGrid', 'on', ...
-             'GridColor', [0.23 0.44 0.34], ...
-             'GridLineStyle', '--', ...
-             'GridAlpha', 0.8);
-             
-    xlabel('Range (meters)'); 
-    ylabel('Power/frequency (dB/Hz)'); 
-    title(['Range Profile - Sweep ', num2str(targetSweep)]);
-    
-    % Lock axis limits to fit the normalized power bounds cleanly
-    axis([0 max(rangeAxis) 0 55]);
+%     %% 6. Visualization (Strictly matched to GUI Source)
+%     figure('Color', 'w', 'Name', 'SDR Range Profile');
+%     
+%     % The source plots a solid green line with LineWidth 1 
+%     plot(rangeAxis, rangePower, 'Color', [0 1 0], 'LineWidth', 1);
+%     
+%     % The source uses a black background with specific dark green dashed grid lines [cite: 88, 89]
+%     set(gca, 'Color', 'k', ...
+%              'XGrid', 'on', 'YGrid', 'on', ...
+%              'GridColor', [0.23 0.44 0.34], ...
+%              'GridLineStyle', '--', ...
+%              'GridAlpha', 0.8);
+%              
+%     xlabel('Range (meters)'); 
+%     ylabel('Power/frequency (dB/Hz)'); 
+%     title(['Range Profile - Sweep ', num2str(targetSweep)]);
+%     
+%     % Lock axis limits to fit the normalized power bounds cleanly
+%     axis([0 max(rangeAxis) 0 55]);
 end

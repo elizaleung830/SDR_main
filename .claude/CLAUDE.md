@@ -11,8 +11,8 @@ Hardware: 2Tx / 4Rx FMCW radar over USB 3.x, driven by a **Cypress FX3** control
 | Path | Status | Purpose |
 |---|---|---|
 | [docs/](docs/) | reference | Datasheets and manual for the radar (PDF) |
-| [Matlab src/](Matlab%20src/) | **read-only reference** | Existing Windows GUI ([PUPradarGUI.m](Matlab%20src/PUPradarGUI.m)) + pre-built `.mexw64`. Source of truth for the radar control surface. Do **not** modify or rebuild. |
-| [Mex src/](Mex%20src/) | **read-only reference** | C++ MEX sources wrapping Cypress CyAPI (Windows-only) + protocol docs ([PupRadar_Protocol.docx](Mex%20src/PupRadar_Protocol.docx), [PupRadar_DataFormat.docx](Mex%20src/PupRadar_DataFormat.docx)). Reference for porting, not a build input. |
+| [docs/Matlab src/](Matlab%20src/) | **read-only reference** | Existing Windows GUI ([PUPradarGUI.m](Matlab%20src/PUPradarGUI.m)) + pre-built `.mexw64`. Source of truth for the radar control surface. Do **not** modify or rebuild. |
+| [docs/Mex src/](Mex%20src/) | **read-only reference** | C++ MEX sources wrapping Cypress CyAPI (Windows-only) + protocol docs ([PupRadar_Protocol.docx](Mex%20src/PupRadar_Protocol.docx), [PupRadar_DataFormat.docx](Mex%20src/PupRadar_DataFormat.docx)). Reference for porting, not a build input. |
 | `linux/` | **NEW — all new code lives here** | Cross-compiled C++17 executable, libusb-1.0 based. See [the plan](../../../.claude/plans/frolicking-strolling-dijkstra.md). |
 
 ## Architecture (capture-only MVP)
@@ -51,7 +51,7 @@ The MATLAB → C++ mapping:
 
 ## Working rules for Claude in this repo
 
-1. **Never modify `Matlab src/` or `Mex src/`.** They are the canonical reference for the radar's wire protocol; treat them as read-only.
+1. **Never modify `docs/Matlab src/` or `docs/Mex src/`.** They are the canonical reference for the radar's wire protocol; treat them as read-only.
 2. **All new code goes under `linux/`.** Do not scatter Linux-port files at the project root.
 3. **Wire-protocol authority is the .docx files first**, MATLAB + MEX source second. If the docs and code disagree, ask the user — don't guess.
 4. **No DSP in the MVP.** If a request implies on-device FFT, range-Doppler, CFAR, or detection, stop and confirm — that is explicitly deferred.
