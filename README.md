@@ -69,22 +69,7 @@ SDR_main/
 
 ---
 
-## Workflow 1 — Windows MATLAB GUI
-
-### Prerequisites
-- MATLAB with GUIDE support
-- Radar plugged in via USB 3.x
-- All `*.mexw64` files present in `docs/Matlab src/`
-
-### Running
-1. Open MATLAB, `cd` into `docs/Matlab src/`
-2. Run `PUPradarGUI`
-
-The GUI calls MEX binaries in this sequence: `usbcheckchip` → `usbdownload` → `usbsetinterface{0,1}` → `Send_Basic_Parameter` → `Send_PLL_Sawtooth` → `SetActiveParameters` → `GetComplexData` (looped).
-
----
-
-## Workflow 2 — Linux standalone capture (Raspberry Pi)
+## How to run the interface (Linux standalone capture)
 
 `linux/` contains a C++17 binary that replaces the Windows GUI with a CLI. It runs **without any MATLAB runtime** on the Pi, using libusb-1.0 instead of CyAPI.
 
