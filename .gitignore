@@ -3,5 +3,6 @@
 
 # OS / editor noise
 .DS_Store
-.claude
+.claude/
+.mcp.json
 Thumbs.db

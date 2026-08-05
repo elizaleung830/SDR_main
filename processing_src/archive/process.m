@@ -21,13 +21,13 @@ fclose(fid2);
 
 % 4. Separate I (odd indices) and Q (even indices) and form the complex array
 % Note: MATLAB uses 1-based indexing
-I = double(raw(1:2:end)); 
-Q = double(raw(2:2:end));
+Q = double(raw(1:2:end)); 
+I = double(raw(2:2:end));
 min_len = min(length(I), length(Q));
 iq_data = I(1:min_len) + 1i * Q(1:min_len);
 
-I2 = double(raw2(1:2:end)); 
-Q2 = double(raw2(2:2:end));
+Q2 = double(raw2(1:2:end)); 
+I2 = double(raw2(2:2:end));
 min_len2 = min(length(I2), length(Q2));
 iq_data2 = I2(1:min_len2) + 1i * Q2(1:min_len2);
 
@@ -102,7 +102,7 @@ function updatePlot(ax, lbl, iq_data, iq_data2, numSweeps, fs, T_sweep, BW, samp
     title(ax, sprintf('Comparison of Range Profiles (Sweep %d)', currentSweep));
     lgd = legend(ax, 'Background Capture', 'Waving hand Capture');
     
-    % Force the legend to match the dark theme and pin its location
+    % Force the legend to match the dark theme d pin itsan location
     set(lgd, 'TextColor', 'w', ...          % White text
              'Color', 'k', ...              % Black background
              'EdgeColor', [0.5 0.5 0.5], ...% Gray border so it stands out

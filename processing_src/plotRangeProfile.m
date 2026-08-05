@@ -24,12 +24,12 @@ function [rangeAxis, rangePower] = plotRangeProfile(iqArray1D, numSweeps, fs, T_
     
     % Apply Butterworth bandpass filter
     % GUI uses [0.04, 0.85] normalized frequency [cite: 76, 83]
-    [b, a] = butter(4, [0.04, 0.85]);
-    iqFiltered = filter(b, a, iqMatrix);
+    %[b, a] = butter(4, [0.04, 0.85]);
+    %iqMatrix = filter(b, a, iqMatrix);
 
     %% 3. Range FFT & Static Clutter Removal
     % Perform FFT along the first dimension (Fast-Time) [cite: 83]
-    rangeFFT = fft(iqFiltered, fftSize, 1);
+    rangeFFT = fft(iqMatrix, fftSize, 1);
     
     % Keep positive range bins [cite: 84]
     rangeFFT = rangeFFT(1:fftSize/2, :); 
@@ -56,7 +56,8 @@ function [rangeAxis, rangePower] = plotRangeProfile(iqArray1D, numSweeps, fs, T_
     beatFrequency = (peakIndex - 1) * frequencyBinWidth;
     
     % 2. Calculate the Time Delay (tau)
-    timeDelay = beatFrequency * (T_sweep / BW);
+    f_slope = BW / T_sweep;        % Frequency slope (Hz/s)
+    timeDelay = beatFrequency / f_slope;
     
     % 3. Calculate Range (just to verify it matches your plot axis)
     c = 3e8;
@@ -69,31 +70,13 @@ function [rangeAxis, rangePower] = plotRangeProfile(iqArray1D, numSweeps, fs, T_
 
     %% 5. Range Axis Mapping
     c = 3e8; 
-    LARR = 1.4; % Calibration Range Ratio from source [cite: 53]
+    %LARR = 1.4; % Calibration Range Ratio from source [cite: 53]
     
     % The GUI maps the axis up to fs/4 [cite: 86]
-    freqAxis = linspace(0, fs/4, fftSize/2);
+    % freqAxis = linspace(0, fs/4, fftSize/2);
+    freqAxis = (0:fftSize/2-1) * frequencyBinWidth;
     
     % Convert frequency to range [cite: 86]
-    rangeAxis = freqAxis * T_sweep / (2 * BW) * LARR * c;
+    rangeAxis = freqAxis * T_sweep / (2 * BW)  * c;
 
-%     %% 6. Visualization (Strictly matched to GUI Source)
-%     figure('Color', 'w', 'Name', 'SDR Range Profile');
-%     
-%     % The source plots a solid green line with LineWidth 1 
-%     plot(rangeAxis, rangePower, 'Color', [0 1 0], 'LineWidth', 1);
-%     
-%     % The source uses a black background with specific dark green dashed grid lines [cite: 88, 89]
-%     set(gca, 'Color', 'k', ...
-%              'XGrid', 'on', 'YGrid', 'on', ...
-%              'GridColor', [0.23 0.44 0.34], ...
-%              'GridLineStyle', '--', ...
-%              'GridAlpha', 0.8);
-%              
-%     xlabel('Range (meters)'); 
-%     ylabel('Power/frequency (dB/Hz)'); 
-%     title(['Range Profile - Sweep ', num2str(targetSweep)]);
-%     
-%     % Lock axis limits to fit the normalized power bounds cleanly
-%     axis([0 max(rangeAxis) 0 55]);
 end
