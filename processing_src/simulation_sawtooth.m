@@ -1,3 +1,4 @@
+clear;
 % Parameters
 c = 3e8;                % Speed of light (m/s)
 f_start = 24e9;         % Start frequency (Hz)
@@ -68,6 +69,6 @@ subplot(3,1,3);
 plot(rangeAxis, rangePower);
 xlabel('Range (m)');
 ylabel('Amplitude');
-xlim([0, R*2]);
+xlim([0, R*10]);
 title(['FMCW Range Detection of a Perfect Reflector ', R, "m away (plotRangeProfileRaw)"]);
 grid on;
