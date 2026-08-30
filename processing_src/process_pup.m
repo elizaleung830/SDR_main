@@ -2,7 +2,7 @@ clear;
 isPUP = true;
 
 % Note: Overwritten filename variables from your original script are consolidated here
-filename1 = "C:\Users\eliza\SDR_main\SDR_main\temp\1907_160to10cm_PUP_128ns_05ms_01.txt";
+filename1 = "C:\Users\eliza\SDR_main\SDR_main\temp\1907_160cm_PUP_01.txt";
 filename2 = "C:\Users\eliza\SDR_main\SDR_main\temp\1907_160to10cm_PUP_128ns_05ms_01.txt";
 
 sampSize = 128;
