@@ -1,4 +1,4 @@
-function [I_out, Q_out, freqAxis, rangeAxis, avgSpectrum] = process_matlab(filename, sampSize, T_sweep, BW)
+function [raw, I_out, Q_out, freqAxis, rangeAxis, avgSpectrum] = process_matlab(filename, sampSize, T_sweep, BW)
 % processRangeProfile  Load SDR data and compute averaged range profile
 %
 % INPUTS:
@@ -19,33 +19,28 @@ function [I_out, Q_out, freqAxis, rangeAxis, avgSpectrum] = process_matlab(filen
     fs     = sampSize / T_sweep / 2;   % sampling frequency
     fftSize = sampSize;
 
-    %% Load and strip metadata
-    raw = readmatrix(filename);
-    raw = raw(41:end);                 % remove first 40 lines of metadata
-
-    %% Separate interleaved Q/I
-    % File format: Q at odd indices (1,3,5,...), I at even indices (2,4,6,...)
-    Q = double(raw(1:2:end));
-    I = double(raw(2:2:end));
-
-    %% Form complex IQ, trim to equal length
-    min_len  = min(length(I), length(Q));
-    I        = I(1:min_len);
-    Q        = Q(1:min_len);
-
-    %% Trim to integer number of sweeps
-    numSweeps = floor(min_len / (sampSize / 2));
-    nSamples  = numSweeps * sampSize / 2;
-    I         = I(1:nSamples);
-    Q         = Q(1:nSamples);
-    iq_data   = I + 1i * Q;
-
-    %% Reshape: each column = one sweep
-    Iq_sweeps = reshape(iq_data, sampSize/2, numSweeps);  % [sampSize/2 x numSweeps]
-
-    %% Expose raw I and Q as reshaped matrices for output
-    I_out = reshape(I, sampSize/2, numSweeps);  % [sampSize/2 x numSweeps]
-    Q_out = reshape(Q, sampSize/2, numSweeps);  % [sampSize/2 x numSweeps]
+        %% Load data — .mat (GUI export) or raw text
+    [~, ~, ext] = fileparts(filename);
+    if strcmpi(ext, '.mat')
+        S = load(filename);
+        % GUI saves ComplexDataTx1 for Tx1, ComplexDataTx2 for Tx2
+        if isfield(S, 'ComplexDataTx1') && any(S.ComplexDataTx1(:) ~= 0)
+            iqMat = S.ComplexDataTx1;
+        else
+            iqMat = S.ComplexDataTx2;
+        end
+        raw       = iqMat;                          % expose the loaded matrix
+        numSweeps = size(iqMat, 2);
+        Iq_sweeps = iqMat;                          % already [LASN*LANR x numSweeps]
+        I_out     = real(iqMat);
+        Q_out     = imag(iqMat);
+        % override caller args with what the GUI actually used, if present
+        if isfield(S, 'LASN'), sampSize = 2 * S.LASN; fftSize = sampSize; end
+        if isfield(S, 'LAST'), T_sweep  = S.LAST;  end
+        if isfield(S, 'LAFL') && isfield(S, 'LAFH'), BW = S.LAFH - S.LAFL; end
+        fs = sampSize / T_sweep / 2;
+    end
+          % remove first 40 lines of metadata
 
     %% DC offset removal
     Iq_sweeps = Iq_sweeps - mean(Iq_sweeps, 'all');

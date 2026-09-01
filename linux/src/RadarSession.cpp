@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace pupradar {
@@ -174,14 +175,14 @@ void RadarSession::requestBoardInfo() {
 }
 
 /**
- * @brief Full device bring-up: open pre-firmware device, download firmware, wait for
- *        re-enumeration, reclaim the interface, and fetch board info.
+ * @brief Full device bring-up, retried until the board info carries FA05.
  *
- * Mirrors PUPradar_initiating() in the MATLAB GUI. Steps:
+ * Each attempt (attemptBringUp()) performs the sequence PUPradar_initiating()
+ * does in the MATLAB GUI:
  *   1. Open the unprogrammed FX2LP (VID 0x04B4 / PID 0x8613).
  *   2. Claim interface 0, set alternate setting 1 (benign if the descriptor lacks it).
  *   3. Download firmware via the Cypress 0xA0 loader (downloadFirmware()).
- *   4. Wait for the chip to re-enumerate under one of post_fw_candidates.
+ *   4. Wait for the chip to detach and re-enumerate under one of post_fw_candidates.
  *   5. Claim interface 0 and set alternate setting 1 again (now required for bulk EPs).
  *   6. Request board info (requestBoardInfo()) — result available via lastBoardInfo().
  *
@@ -189,9 +190,9 @@ void RadarSession::requestBoardInfo() {
  *                           the firmware boots. Tried in order until one opens or the timeout
  *                           elapses.
  * @param reenum_timeout_ms  Maximum time in milliseconds to wait for re-enumeration
- *                           (default: 5000 ms).
+ *                           on each attempt (default: 5000 ms).
  * @throws std::invalid_argument if post_fw_candidates is empty.
- * @throws UsbError or std::runtime_error on any USB failure.
+ * @throws UsbError or std::runtime_error if the final attempt hits a USB failure.
  */
 void RadarSession::initialize(
         const std::vector<IUsbBackend::VidPid>& post_fw_candidates,
@@ -200,10 +201,41 @@ void RadarSession::initialize(
         throw std::invalid_argument("Need at least one post-firmware VID/PID candidate");
     }
 
+    // The bring-up handshake is unreliable, so retry it — this mirrors the GUI,
+    // which calls PUPradar_initiating() twice unconditionally and then loops up
+    // to five more times until the board info decodes (PUPradarGUI.m:115-119).
+    constexpr int kMaxInitAttempts = 7;  // GUI's 2 unconditional + 5 retries
+    for (int attempt = 1; attempt <= kMaxInitAttempts; ++attempt) {
+        try {
+            attemptBringUp(post_fw_candidates, reenum_timeout_ms);
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            if (decodeBoardInfo(last_board_info_).valid) {
+                return;  // FA05 present — device is in a known-good state.
+            }
+        } catch (const std::exception&) {
+            // Swallow and retry; the final attempt reports for real.
+        }
+        usb_.close();  // drop the handle so the next attempt opens cleanly
+    }
+}
+
+/**
+ * @brief One pass of the bring-up sequence, as attempted by initialize().
+ *
+ * Split out so initialize() can retry it. Leaves the board info in
+ * last_board_info_; the caller checks it for the FA05 signature.
+ *
+ * @param post_fw_candidates VID/PID pairs the chip may present after booting.
+ * @param reenum_timeout_ms  Re-enumeration wait budget.
+ * @throws UsbError or std::runtime_error on any USB failure.
+ */
+void RadarSession::attemptBringUp(
+        const std::vector<IUsbBackend::VidPid>& post_fw_candidates,
+        unsigned int reenum_timeout_ms) {
     // Pre-firmware open
     usb_.open(kPreFirmwareVid, kPreFirmwarePid);
     usb_.claimInterface(kInterfaceNumber);
-    
+
     // Set alt 1 — this matches PUPradar_initiating ordering. On the
     // unprogrammed FX2LP this is benign because the default descriptor
     // exposes a single interface 0 with one alt setting.
@@ -217,6 +249,7 @@ void RadarSession::initialize(
     downloadFirmware();
 
     // Re-enumeration: chip detaches and re-appears with firmware-defined VID/PID.
+    // Throws if the device never detached — see reopenAfterRenumeration().
     usb_.reopenAfterRenumeration(post_fw_candidates.data(),
                                  post_fw_candidates.size(),
                                  reenum_timeout_ms);

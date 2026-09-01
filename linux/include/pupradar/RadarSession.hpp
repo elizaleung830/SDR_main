@@ -80,6 +80,10 @@ private:
     void sendCommand(std::uint8_t opcode, std::uint8_t parameter);
     void downloadFirmware();
     void requestBoardInfo();
+    /// One pass of the bring-up sequence; initialize() retries this until the
+    /// board info carries the FA05 signature.
+    void attemptBringUp(const std::vector<IUsbBackend::VidPid>& post_fw_candidates,
+                        unsigned int reenum_timeout_ms);
 
     IUsbBackend&               usb_;
     std::string                fw_path_;

@@ -1,11 +1,11 @@
-filename = "C:\Users\eliza\SDR_main\SDR_main\data\30082026_matlab\3008_1GHz_128_0-5ms_outdoor_2m";
-filename_pi = "C:\Users\eliza\SDR_main\SDR_main\data\30082026_pi\3008_1GHz_256_0-5ms_outdoor_3m_pi.bin";
+filename="C:\Users\eliza\OneDrive\Desktop\SDR_Measurement_uni\SDR_main\data\01092026_matlab\0109_2GHz_128_0-5ms_loopback.mat";
+filename_pi = "D:\0109_pi\0109_2GHz_128_0-5ms_loopback_rx4.bin";
 sampSize=128;
 T_sweep=0.5e-3;
-BW=1e9;
-display_sweep=200;
-[I, Q, freqAxis, rangeAxis, avgSpectrum] = process_matlab(filename, sampSize, T_sweep, BW);
-[I_pi, Q_pi, freqAxis_pi, rangeAxis_pi, avgSpectrum_pi] = process_pi(filename_pi, sampSize, T_sweep, BW);
+BW=2e9;
+display_sweep=300;
+[raw, I, Q, freqAxis, rangeAxis, avgSpectrum] = process_matlab(filename, sampSize, T_sweep, BW);
+[raw_pi, I_pi, Q_pi, freqAxis_pi, rangeAxis_pi, avgSpectrum_pi] = process_pi(filename_pi, sampSize, T_sweep, BW);
 
 % Plot raw IQ
 figure;
