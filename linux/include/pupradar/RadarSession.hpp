@@ -20,11 +20,6 @@ struct CaptureConfig {
     Modulation      modulation     = Modulation::Sawtooth;
     double          duration_s     = 5.0;
     unsigned int    bulk_timeout_ms = 2000;
-    /// Batches to read and throw away before the timed capture begins.
-    /// The device's first batch after a config change still carries the
-    /// PREVIOUS configuration, so without this a changed --rx shows up only in
-    /// the next capture. 2 is empirical; raise it if data still lags a run.
-    int             warmup_reads   = 2;
 };
 
 struct CaptureMetadata {

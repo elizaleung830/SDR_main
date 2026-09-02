@@ -36,6 +36,12 @@ constexpr std::size_t kBoardInfoUsefulOffsetBytes = 2048;
 // the decode in requestBoardInfo() is therefore bounded by what actually arrived.
 constexpr std::size_t kBoardInfoExposedBytes = 32;
 
+// FX2LP high-speed bulk max packet. Every bulk IN request length must be a
+// whole multiple of this: ask for less than a packet and the device's next full
+// packet overflows the buffer, which libusb reports as LIBUSB_ERROR_OVERFLOW
+// and the kernel logs as a buffer overflow against the USB device.
+constexpr std::size_t kBulkPacketBytes = 512;
+
 /**
  * @brief Returns the current UTC wall-clock time as an ISO-8601 string.
  * @return Timestamp in the form "YYYY-MM-DDTHH:MM:SSZ" (second resolution).
@@ -284,19 +290,27 @@ void RadarSession::attemptBringUp(
 /**
  * @brief Attaches to a board already running firmware, skipping the loader.
  *
- * Mirrors the direct path in board_info.cpp: open the post-firmware device,
- * claim interface 0 / alt 1, then read board info. Deliberately does NOT
- * download firmware or wait for re-enumeration.
+ * Opens the post-firmware device, forces a USB re-enumeration, claims
+ * interface 0 / alt 1, then reads board info. No firmware download.
+ *
+ * The re-enumeration is the point of doing this rather than just opening the
+ * device: it puts the USB side back to a known state and drops whatever the
+ * previous session left queued on the endpoints, without re-running the loader.
  *
  * @param vid Post-firmware Vendor ID.
  * @param pid Post-firmware Product ID.
- * @throws UsbError or std::runtime_error if the device cannot be opened,
+ * @throws UsbError or std::runtime_error if the device cannot be opened, reset,
  *         claimed, or does not answer the board-info request.
  */
 void RadarSession::attachRunning(std::uint16_t vid, std::uint16_t pid) {
     std::fprintf(stderr, "[pupradar] attaching to running device %04X:%04X "
                          "(no firmware download)\n", vid, pid);
     usb_.open(vid, pid);
+
+    std::fprintf(stderr, "[pupradar]   re-enumerating…\n");
+    usb_.resetDevice();
+    std::fprintf(stderr, "[pupradar]   re-enumeration done\n");
+
     usb_.claimInterface(kInterfaceNumber);
     usb_.setAltSetting(kInterfaceNumber, kAlternateSetting);
     requestBoardInfo();
@@ -342,17 +356,23 @@ void RadarSession::configure(const CaptureConfig& cfg) {
 }
 
 /**
- * @brief Bulk-reads raw IQ data from EP6 for cfg.duration_s seconds, forwarding each
- *        chunk to sink.
+ * @brief Records cfg.duration_s of IQ the way the GUI's Record button does.
  *
- * Buffer sizing mirrors the GUI at line 2730: (kNumSweepsPerRead=64 + 40) sweeps worth of
- * raw bytes, rounded up to a 512-byte boundary, plus 4096 bytes of padding. The capture
- * loop runs until std::chrono::steady_clock exceeds the computed deadline; zero-length
- * reads are silently skipped. No DSP is performed — this is a capture-only MVP.
+ * Follows PUPradarGUI.m:1831-1859 (Record), NOT the display loop at :203-248:
+ *   1. configure() ONCE — basic parameters and PLL registers.
+ *   2. One logical transfer sized for the whole recording:
+ *      NumSweeps = duration / sweep_time, then GUI line 2730's
+ *      ceil((NumSweeps+40)*LASN*2*LANR*LANT/512)*512 + 4096 bytes. libusb may
+ *      satisfy it in pieces; the config is never re-sent between them.
+ *   4. Drop the leading 4096 stale-FIFO bytes (GUI line 2734) before the sink.
+ *
+ * The device is deliberately not reconfigured during the transfer. Doing so
+ * re-triggers the sweep generator mid-stream, which yields one live sweep per
+ * read followed by the mixer output decaying to DC.
  *
  * @param cfg  Capture configuration used for buffer sizing, run duration, and bulk timeout.
- *             Must match the configuration previously sent via configure().
- * @param sink Callback invoked with each non-empty bulk read chunk (raw pointer into an
+ *             Applied by this function; no prior configure() call is needed.
+ * @param sink Called once with the de-preambled capture (pointer into an
  *             internal buffer, valid only for the duration of the call).
  * @return CaptureMetadata populated with echoed config values, derived sample rate (fs_hz),
  *         sweep time, actual capture duration, byte and read counts, last board info words,
@@ -368,63 +388,96 @@ CaptureMetadata RadarSession::captureIq(const CaptureConfig& cfg,
     const double sweep_time_s = sweepTimeFromIndex(cfg.sweep_time_idx);
     const double fs_hz = static_cast<double>(samples_per_sweep_per_rx) / sweep_time_s;
 
-    // Read size mirrors GUI line 2730: round to 512-byte boundary, plus 4096
-    // padding. NumSweeps batched to 64 to match the GUI's run loop, which is
-    // what the firmware's USB FIFO is sized for.
-    constexpr int kNumSweepsPerRead = 64;
-    // samplesPerSweep() returns the BASN value, which is already a uint16 count
-    // with I and Q interleaved (both channels). Multiplying by 2 for int16 byte
-    // width is correct; multiplying again for I,Q would double-count and produce
-    // a buffer 2× too large, causing libusb to wait beyond the FX3's burst size.
-    const std::size_t bytes_per_sweep =
+    // GUI line 2728: LASNperSweep = LASN*LANR*2*LANT — that is a count of uint16
+    // WORDS per sweep (the *2 is I and Q). Confirmed against real captures: at
+    // LASN=128, 1 Rx, 1 Tx the measured marker-to-marker stride is 256 words.
+    const std::size_t words_per_sweep =
         static_cast<std::size_t>(samples_per_sweep_per_rx) *
-        2u /* bytes per uint16 */ *
+        2u /* I and Q */ *
         static_cast<std::size_t>(n_rx) * static_cast<std::size_t>(n_tx);
-    const std::size_t raw_bytes_per_read =
-        static_cast<std::size_t>(kNumSweepsPerRead + 40) * bytes_per_sweep;
-    // Round UP to 512-byte boundary, then add 4096
-    const std::size_t bytes_per_read =
-        ((raw_bytes_per_read + 511u) / 512u) * 512u + 4096u;
 
-    std::vector<std::uint8_t> buf(bytes_per_read, 0);
+    // ...and two bytes per word. The GUI drops this factor: line 2730 builds
+    // DataLength from the WORD count, but miniradargetdata hands it to CyAPI
+    // XferData as a BYTE count (miniradargetdata.cpp:40), so the GUI actually
+    // transfers half the sweeps it asked for — which is why it then has to clamp
+    // NumSweeps down to ValidSweepNumber at lines 2744-2748. Mirroring that
+    // exactly gave captures half the requested duration, so keep the factor.
+    const std::size_t bytes_per_sweep = words_per_sweep * 2u;
+
+    // ---- 1. Size the transfer, as GUI Record does --------------------------
+    //
+    // GUI Record (PUPradarGUI.m:1831-1859) sets NumSweeps = RecordTime /
+    // SweepTime — the whole recording, not a batch — and makes a SINGLE
+    // GetComplexData call for it.
+    const auto num_sweeps = static_cast<std::size_t>(cfg.duration_s / sweep_time_s);
+    const std::size_t raw_bytes = (num_sweeps + 40) * bytes_per_sweep;
+    // Round UP to a 512-byte boundary, then add 4096 (GUI line 2730). The extra
+    // 4096 exists because the first 4096 bytes are stale FIFO content; the GUI
+    // discards exactly that many at line 2734.
+    const std::size_t capture_bytes = ((raw_bytes + 511u) / 512u) * 512u + 4096u;
+
+    // ---- 2. Buffer and the read helper both phases share -------------------
+    //
+    // One max-packet of slack past capture_bytes. libusb hands the whole request
+    // to the kernel, which will write a complete packet or fail the transfer, so
+    // the destination must always have room for one even when the tail of the
+    // capture does not need it.
+    std::vector<std::uint8_t> buf(capture_bytes + kBulkPacketBytes, 0);
+
+    // Fills `buf` up to capture_bytes without reconfiguring, returning the bytes
+    // received.
+    //
+    // Every request length is a whole multiple of the 512-byte endpoint max
+    // packet. A bulk IN request that is not gets LIBUSB_ERROR_OVERFLOW the
+    // moment the device sends a full packet into the short remainder — which
+    // surfaces as a kernel "buffer overflow" against the USB device. Rounding
+    // the remainder down is what keeps every request legal; the slack in `buf`
+    // covers the case where the device answers with a partial packet and leaves
+    // total_bytes off a 512-byte boundary.
+    const unsigned int transfer_timeout_ms =
+        static_cast<unsigned int>(cfg.duration_s * 1000.0) + cfg.bulk_timeout_ms;
+    auto readCapture = [&](std::size_t& reads_out) -> std::size_t {
+        std::size_t total = 0;
+        while (total < capture_bytes) {
+            const std::size_t remaining = capture_bytes - total;
+            const std::size_t request =
+                (remaining / kBulkPacketBytes) * kBulkPacketBytes;
+            if (request == 0) break;  // less than one packet left to ask for
+            std::size_t got = usb_.bulkRead(kEpInBulk, buf.data() + total,
+                                             request, transfer_timeout_ms);
+            ++reads_out;
+            if (got == 0) break;  // device has nothing more to give
+            total += got;
+        }
+        return total;
+    };
+
+    // ---- 3. The recording --------------------------------------------------
+    //
+    // configure() ONCE, then the device is left alone for the whole transfer.
+    // An earlier implementation re-sent all 22 command packets before every
+    // 30 KB read, hundreds of times per capture. That mirrors the GUI's *display*
+    // loop, which reconfigures per frame only because it polls the UI for live
+    // changes; Record deliberately does not. Re-triggering the sweep generator
+    // mid-stream is what produced one live sweep per read followed by the mixer
+    // output decaying to DC.
+    configure(cfg);
 
     using clock = std::chrono::steady_clock;
-
-    // Discard the first batches, before timing starts.
-    //
-    // The device serves a batch captured under whatever configuration was
-    // active when it was last triggered, so the first read after a config
-    // change returns the PREVIOUS run's settings — change --rx and the data
-    // still comes from the old channel, with the new one only showing up in the
-    // following capture. The GUI never exposes this because it loops
-    // continuously on screen: its one stale frame is overwritten immediately
-    // and nobody sees it. A one-shot capture has no next frame, so the stale
-    // batch lands in the file.
-    for (int i = 0; i < cfg.warmup_reads; ++i) {
-        configure(cfg);
-        usb_.bulkRead(kEpInBulk, buf.data(), buf.size(), cfg.bulk_timeout_ms);
-    }
-
     const auto t_start = clock::now();
-    const auto t_end   = t_start +
-        std::chrono::milliseconds(static_cast<long>(cfg.duration_s * 1000.0));
 
-    std::size_t total_bytes = 0;
+    // One logical transfer: libusb may satisfy a multi-megabyte bulk request in
+    // pieces, but the config is never re-sent between them.
     std::size_t reads_done  = 0;
-
-    while (clock::now() < t_end) {
-        // Mirror MATLAB GUI: re-send full config before every read so the FX3
-        // re-arms its capture buffer (it fills one batch per configure trigger,
-        // then outputs 0x07FD filler until re-triggered).
-        configure(cfg);
-        std::size_t got = usb_.bulkRead(kEpInBulk, buf.data(), buf.size(),
-                                         cfg.bulk_timeout_ms);
-        if (got == 0) continue;
-        sink(buf.data(), got);
-        total_bytes += got;
-        ++reads_done;
-    }
+    const std::size_t total_bytes = readCapture(reads_done);
     const auto t_done = clock::now();
+
+    // Discard the stale FIFO preamble, as GUI line 2734
+    // (RawData = double(RawData(2049:end))), then hand over the real samples.
+    constexpr std::size_t kStalePreambleBytes = 2048 * 2;
+    if (total_bytes > kStalePreambleBytes) {
+        sink(buf.data() + kStalePreambleBytes, total_bytes - kStalePreambleBytes);
+    }
 
     CaptureMetadata md;
     md.f_low_hz                 = cfg.f_low_hz;
@@ -438,7 +491,10 @@ CaptureMetadata RadarSession::captureIq(const CaptureConfig& cfg,
     md.rx_mask                  = cfg.rx_mask;
     md.requested_duration_s     = cfg.duration_s;
     md.actual_duration_s        = std::chrono::duration<double>(t_done - t_start).count();
-    md.bytes_captured           = total_bytes;
+    // Report what actually reached the sink (and therefore the .bin), not what
+    // came off the wire, so the sidecar matches the file on disk.
+    md.bytes_captured           = total_bytes > kStalePreambleBytes
+                                      ? total_bytes - kStalePreambleBytes : 0;
     md.reads_completed          = reads_done;
     md.board_info_words         = last_board_info_;
     md.firmware_path            = fw_path_;

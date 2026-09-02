@@ -51,10 +51,6 @@ void printUsage(const char* prog) {
         "  --download-firmware       Apply this flag to a board that haven't downloaded the firmware yet. (i.e., when board is in a new power cycle)\n"
         "  --reenum-timeout-ms <ms>  Re-enumeration wait after firmware load (default 5000)\n"
         "  --bulk-timeout-ms <ms>    Bulk-read timeout per chunk (default 2000)\n"
-        "  --warmup-reads <n>        Batches to discard before capturing (default 2).\n"
-        "                            The device's first batch after a config change\n"
-        "                            still holds the PREVIOUS settings, so without\n"
-        "                            this a changed --rx appears one capture late.\n"
         "  --cmd-delay-us <us>       Settling delay after each command packet (default 0).\n"
         "                            Raise it if the board ignores parameters or returns filler.\n"
         "  -h, --help                Show this help\n";
@@ -118,7 +114,6 @@ int main(int argc, char** argv) try {
     cfg.tx_mask         = static_cast<std::uint8_t>(args.getInt("tx", 1));
     cfg.rx_mask         = static_cast<std::uint8_t>(args.getInt("rx", 1));
     cfg.bulk_timeout_ms = args.getUint  ("bulk-timeout-ms", 2000);
-    cfg.warmup_reads    = args.getInt   ("warmup-reads",    2);
 
     const std::string out_base    = args.get("out");
     const std::string firmware    = args.get("firmware", "firmware/SDR_USB_FW.hex");
