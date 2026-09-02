@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <iomanip>
@@ -81,6 +82,11 @@ void RadarSession::sendCommand(std::uint8_t opcode, std::uint8_t parameter) {
         oss << "sendCommand(0x" << std::hex << +opcode << ",0x" << +parameter
             << "): short write " << std::dec << n << "/" << pkt.size();
         throw std::runtime_error(oss.str());
+    }
+    // Give the MCU time to act on this command before the next one lands.
+    // See RadarSession::setCommandDelayUs for why this is not always zero.
+    if (cmd_delay_us_ > 0) {
+        std::this_thread::sleep_for(std::chrono::microseconds(cmd_delay_us_));
     }
 }
 
@@ -201,22 +207,29 @@ void RadarSession::initialize(
         throw std::invalid_argument("Need at least one post-firmware VID/PID candidate");
     }
 
-    // The bring-up handshake is unreliable, so retry it — this mirrors the GUI,
-    // which calls PUPradar_initiating() twice unconditionally and then loops up
-    // to five more times until the board info decodes (PUPradarGUI.m:115-119).
+    // The bring-up handshake is unreliable, so retry it until the board info carries the FA05 signature.   
     constexpr int kMaxInitAttempts = 7;  // GUI's 2 unconditional + 5 retries
     for (int attempt = 1; attempt <= kMaxInitAttempts; ++attempt) {
+        std::fprintf(stderr, "[pupradar] init attempt %d/%d\n",
+                     attempt, kMaxInitAttempts);
         try {
             attemptBringUp(post_fw_candidates, reenum_timeout_ms);
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
             if (decodeBoardInfo(last_board_info_).valid) {
+                std::fprintf(stderr, "[pupradar] init attempt %d: FA05 OK\n", attempt);
                 return;  // FA05 present — device is in a known-good state.
             }
-        } catch (const std::exception&) {
-            // Swallow and retry; the final attempt reports for real.
+            std::fprintf(stderr, "[pupradar] init attempt %d: no FA05 in board info\n",
+                         attempt);
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "[pupradar] init attempt %d failed: %s\n",
+                         attempt, e.what());
         }
         usb_.close();  // drop the handle so the next attempt opens cleanly
     }
+    std::fprintf(stderr,
+                 "[pupradar] WARNING: all %d init attempts failed to return a valid\n"
+                 "[pupradar]          FA05 board info.",
+                 kMaxInitAttempts);
 }
 
 /**
@@ -234,6 +247,15 @@ void RadarSession::attemptBringUp(
         unsigned int reenum_timeout_ms) {
     // Pre-firmware open
     usb_.open(kPreFirmwareVid, kPreFirmwarePid);
+    std::fprintf(stderr, "[pupradar]   opened %04X:%04X\n",
+                 kPreFirmwareVid, kPreFirmwarePid);
+
+    // Force the chip back to its power-on state before running the loader.
+    // NOTE: Firmware already running in FX2 RAM survives it.
+    std::fprintf(stderr, "[pupradar]   resetting USB connection\n");
+    usb_.resetDevice();
+    std::fprintf(stderr, "[pupradar]   reset done\n");
+
     usb_.claimInterface(kInterfaceNumber);
 
     // Set alt 1 — this matches PUPradar_initiating ordering. On the
@@ -243,13 +265,13 @@ void RadarSession::attemptBringUp(
         usb_.setAltSetting(kInterfaceNumber, kAlternateSetting);
     } catch (const UsbError&) {
         // Some unprogrammed FX2LP descriptors do not have alt 1; ignore here,
-        // we'll set it again post-firmware where it matters.
     }
 
+    std::fprintf(stderr, "[pupradar]   downloading firmware…\n");
     downloadFirmware();
 
     // Re-enumeration: chip detaches and re-appears with firmware-defined VID/PID.
-    // Throws if the device never detached — see reopenAfterRenumeration().
+    std::fprintf(stderr, "[pupradar]   waiting for re-enumeration…\n");
     usb_.reopenAfterRenumeration(post_fw_candidates.data(),
                                  post_fw_candidates.size(),
                                  reenum_timeout_ms);
@@ -257,6 +279,30 @@ void RadarSession::attemptBringUp(
     usb_.setAltSetting(kInterfaceNumber, kAlternateSetting);
 
     requestBoardInfo();
+}
+
+/**
+ * @brief Attaches to a board already running firmware, skipping the loader.
+ *
+ * Mirrors the direct path in board_info.cpp: open the post-firmware device,
+ * claim interface 0 / alt 1, then read board info. Deliberately does NOT
+ * download firmware or wait for re-enumeration.
+ *
+ * @param vid Post-firmware Vendor ID.
+ * @param pid Post-firmware Product ID.
+ * @throws UsbError or std::runtime_error if the device cannot be opened,
+ *         claimed, or does not answer the board-info request.
+ */
+void RadarSession::attachRunning(std::uint16_t vid, std::uint16_t pid) {
+    std::fprintf(stderr, "[pupradar] attaching to running device %04X:%04X "
+                         "(no firmware download)\n", vid, pid);
+    usb_.open(vid, pid);
+    usb_.claimInterface(kInterfaceNumber);
+    usb_.setAltSetting(kInterfaceNumber, kAlternateSetting);
+    requestBoardInfo();
+    std::fprintf(stderr, "[pupradar] attached: %s\n",
+                 decodeBoardInfo(last_board_info_).valid
+                     ? "FA05 OK" : "no FA05 — is the board actually running firmware?");
 }
 
 /**
@@ -343,6 +389,22 @@ CaptureMetadata RadarSession::captureIq(const CaptureConfig& cfg,
     std::vector<std::uint8_t> buf(bytes_per_read, 0);
 
     using clock = std::chrono::steady_clock;
+
+    // Discard the first batches, before timing starts.
+    //
+    // The device serves a batch captured under whatever configuration was
+    // active when it was last triggered, so the first read after a config
+    // change returns the PREVIOUS run's settings — change --rx and the data
+    // still comes from the old channel, with the new one only showing up in the
+    // following capture. The GUI never exposes this because it loops
+    // continuously on screen: its one stale frame is overwritten immediately
+    // and nobody sees it. A one-shot capture has no next frame, so the stale
+    // batch lands in the file.
+    for (int i = 0; i < cfg.warmup_reads; ++i) {
+        configure(cfg);
+        usb_.bulkRead(kEpInBulk, buf.data(), buf.size(), cfg.bulk_timeout_ms);
+    }
+
     const auto t_start = clock::now();
     const auto t_end   = t_start +
         std::chrono::milliseconds(static_cast<long>(cfg.duration_s * 1000.0));
@@ -381,6 +443,7 @@ CaptureMetadata RadarSession::captureIq(const CaptureConfig& cfg,
     md.board_info_words         = last_board_info_;
     md.firmware_path            = fw_path_;
     md.timestamp_utc            = isoTimestampUtcNow();
+    md.cmd_delay_us             = cmd_delay_us_;
     return md;
 }
 

@@ -20,6 +20,11 @@ struct CaptureConfig {
     Modulation      modulation     = Modulation::Sawtooth;
     double          duration_s     = 5.0;
     unsigned int    bulk_timeout_ms = 2000;
+    /// Batches to read and throw away before the timed capture begins.
+    /// The device's first batch after a config change still carries the
+    /// PREVIOUS configuration, so without this a changed --rx shows up only in
+    /// the next capture. 2 is empirical; raise it if data still lags a run.
+    int             warmup_reads   = 2;
 };
 
 struct CaptureMetadata {
@@ -44,6 +49,8 @@ struct CaptureMetadata {
     std::string     firmware_path;
     // ISO-8601 UTC timestamp
     std::string     timestamp_utc;
+    // Inter-command settling delay in effect during this capture (microseconds).
+    unsigned int    cmd_delay_us = 0;
 };
 
 // Non-owning pointer to a sink that writes IQ bytes to disk (or wherever).
@@ -62,6 +69,13 @@ public:
     void initialize(const std::vector<IUsbBackend::VidPid>& post_fw_candidates,
                     unsigned int reenum_timeout_ms = 5000);
 
+    /// Attach to a board that is already running firmware: open, claim, set alt,
+    /// request board info. No firmware download and no re-enumeration.
+    ///
+    /// @param vid,pid The post-firmware VID/PID the running board presents.
+    /// @throws UsbError if the device cannot be opened or claimed.
+    void attachRunning(std::uint16_t vid, std::uint16_t pid);
+
     /// Apply a configuration: send modulation/sweep/sampling/Tx/Rx and PLL regs.
     void configure(const CaptureConfig& cfg);
 
@@ -72,6 +86,14 @@ public:
 
     /// Power-down convenience: release interfaces, close device.
     void shutdown();
+
+    /// Settling delay inserted after every command packet, in microseconds.
+    ///
+    /// The MCU needs a moment to act on a command before the next one lands;
+    /// back-to-back writes on a fast host can outrun it. Default 0 (no delay) —
+    /// raise it if the board ignores parameters or returns filler data.
+    void setCommandDelayUs(unsigned int us) { cmd_delay_us_ = us; }
+    unsigned int commandDelayUs() const { return cmd_delay_us_; }
 
     /// For testing / observability.
     const std::vector<std::uint16_t>& lastBoardInfo() const { return last_board_info_; }
@@ -88,6 +110,7 @@ private:
     IUsbBackend&               usb_;
     std::string                fw_path_;
     std::vector<std::uint16_t> last_board_info_;
+    unsigned int               cmd_delay_us_ = 0;
 };
 
 }  // namespace pupradar

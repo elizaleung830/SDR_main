@@ -83,7 +83,8 @@ std::vector<HexRecord> parseIntelHex(std::istream& input) {
                 rec.address = address;
                 rec.data.reserve(byte_count);
                 for (std::uint8_t k = 0; k < byte_count; ++k) {
-                    rec.data.push_back(hexByte(line, 9 + 2 * k));
+                    rec.data.push_back(
+                        hexByte(line, 9 + 2 * static_cast<std::size_t>(k)));
                 }
                 records.push_back(std::move(rec));
                 break;

@@ -22,6 +22,7 @@ public:
 
     void claimInterface(int interface_number) override;
     void setAltSetting(int interface_number, int alt_setting) override;
+    void resetDevice() override;
 
     std::size_t controlTransfer(std::uint8_t  bm_request_type,
                                 std::uint8_t  b_request,
@@ -49,6 +50,8 @@ private:
     libusb_context*       ctx_    = nullptr;
     libusb_device_handle* handle_ = nullptr;
     int                   claimed_iface_ = -1;
+    std::uint16_t         last_vid_ = 0;
+    std::uint16_t         last_pid_ = 0;
 };
 
 }  // namespace pupradar

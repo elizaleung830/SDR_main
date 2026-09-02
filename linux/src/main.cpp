@@ -48,8 +48,15 @@ void printUsage(const char* prog) {
         "  --post-fw-pid <0xNNNN>    Post-firmware PID (default 0x8613)\n"
         "  --post-fw-vid2 <0xNNNN>   Optional second VID candidate\n"
         "  --post-fw-pid2 <0xNNNN>   Optional second PID candidate\n"
+        "  --download-firmware       Apply this flag to a board that haven't downloaded the firmware yet. (i.e., when board is in a new power cycle)\n"
         "  --reenum-timeout-ms <ms>  Re-enumeration wait after firmware load (default 5000)\n"
         "  --bulk-timeout-ms <ms>    Bulk-read timeout per chunk (default 2000)\n"
+        "  --warmup-reads <n>        Batches to discard before capturing (default 2).\n"
+        "                            The device's first batch after a config change\n"
+        "                            still holds the PREVIOUS settings, so without\n"
+        "                            this a changed --rx appears one capture late.\n"
+        "  --cmd-delay-us <us>       Settling delay after each command packet (default 0).\n"
+        "                            Raise it if the board ignores parameters or returns filler.\n"
         "  -h, --help                Show this help\n";
 }
 
@@ -62,6 +69,8 @@ public:
             if (a.rfind("--", 0) != 0) {
                 throw std::runtime_error("Unexpected positional argument: " + a);
             }
+            // Valueless flags must be checked before the "needs a value" test.
+            if (a == "--download-firmware") { download_firmware_ = true; continue; }
             if (i + 1 >= argc) {
                 throw std::runtime_error("Missing value for " + a);
             }
@@ -69,6 +78,7 @@ public:
         }
     }
     bool        help() const { return help_; }
+    bool        downloadFirmware() const { return download_firmware_; }
     bool        has(const std::string& k) const { return kv_.count(k) != 0; }
     std::string get(const std::string& k, const std::string& def = "") const {
         auto it = kv_.find(k); return it == kv_.end() ? def : it->second;
@@ -84,6 +94,7 @@ public:
     }
 private:
     bool help_ = false;
+    bool download_firmware_ = false;
     std::map<std::string, std::string> kv_;
 };
 
@@ -107,10 +118,12 @@ int main(int argc, char** argv) try {
     cfg.tx_mask         = static_cast<std::uint8_t>(args.getInt("tx", 1));
     cfg.rx_mask         = static_cast<std::uint8_t>(args.getInt("rx", 1));
     cfg.bulk_timeout_ms = args.getUint  ("bulk-timeout-ms", 2000);
+    cfg.warmup_reads    = args.getInt   ("warmup-reads",    2);
 
     const std::string out_base    = args.get("out");
     const std::string firmware    = args.get("firmware", "firmware/SDR_USB_FW.hex");
     const unsigned int reenum_ms  = args.getUint("reenum-timeout-ms", 5000);
+    const unsigned int cmd_delay_us = args.getUint("cmd-delay-us", 0);
 
     std::vector<pupradar::IUsbBackend::VidPid> post_fw;
     post_fw.push_back({
@@ -132,12 +145,19 @@ int main(int argc, char** argv) try {
               << " samp_idx=" << cfg.samp_num_idx
               << " tx_mask=0x" << std::hex << +cfg.tx_mask
               << " rx_mask=0x" << +cfg.rx_mask << std::dec << "\n";
+    std::cout << "[pupradar] cmd delay: " << cmd_delay_us << " us\n";
 
     pupradar::UsbDevice    usb;
     pupradar::RadarSession session(usb, firmware);
-
-    std::cout << "[pupradar] initializing (open → claim → firmware → reopen)…\n";
-    session.initialize(post_fw, reenum_ms);
+    // Set before bring-up so the board-info handshake gets the same pacing.
+    session.setCommandDelayUs(cmd_delay_us);
+    if (args.downloadFirmware()) {
+        std::cout << "[pupradar] initializing (open → claim → firmware → reopen)…\n";
+        session.initialize(post_fw, reenum_ms);
+    } else {
+        std::cout << "[pupradar] attaching to a running board…\n";
+        session.attachRunning(post_fw[0].vid, post_fw[0].pid);
+    }
 
     std::printf("[pupradar] board info (uint16 words, hex): ");
     for (auto w : session.lastBoardInfo()) std::printf("%04X ", w);
