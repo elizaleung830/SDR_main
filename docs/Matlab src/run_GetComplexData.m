@@ -23,12 +23,12 @@ handles = makeRadarHandles( ...
 
 %% ---- Get the data -----------------------------------------------------
 if USE_HARDWARE
-    % Bring up the USB link the same way the GUI does, then stash the
-    % endpoint on handles. Adjust to match your setup.
-    handles.EndPoint6_Num = usbfindendpoint(134);   % 134 = 0x86, as in the GUI
-    if handles.EndPoint6_Num == 0
-        error('Could not find USB endpoint 0x86 - is the radar connected and the FW loaded?');
-    end
+    % Bring up the USB link and download the firmware, as the GUI does.
+    handles = PUPradar_initiating(handles, 'Verbose', true);
+
+    % Program the FMCW chirp before acquiring.
+    Send_PLL_Sawtooth(handles);
+
     [Tx1, Tx2, NumSweeps] = GetComplexData(handles);
 else
     S = load(RAW_FILE);

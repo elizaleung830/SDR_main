@@ -21,10 +21,8 @@ if DRY_RUN
     fprintf('DRY RUN - nothing is sent to the radar.\n\n');
     [regs, handles] = Send_PLL_Sawtooth(handles, 'DryRun', true, 'Verbose', true);
 else
-    handles.EndPoint2_Num = usbfindendpoint(2);
-    if handles.EndPoint2_Num == 0
-        error('Could not find USB endpoint 2 - is the radar connected and the FW loaded?');
-    end
+    % Brings up USB, downloads the firmware and fills in the endpoints.
+    handles = PUPradar_initiating(handles, 'Verbose', true);
     [regs, handles] = Send_PLL_Sawtooth(handles, 'Verbose', true);
 end
 
