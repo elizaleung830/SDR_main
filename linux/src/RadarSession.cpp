@@ -360,6 +360,9 @@ void RadarSession::configure(const CaptureConfig& cfg) {
  *
  * Follows PUPradarGUI.m:1831-1859 (Record), NOT the display loop at :203-248:
  *   1. configure() ONCE — basic parameters and PLL registers.
+ *   1b. Drain cfg.drain_sweeps of stale FIFO content, then reconfigure. This has
+ *      no GUI counterpart in Record itself; it stands in for the Start loop,
+ *      which Record can only ever run after and which drains continuously.
  *   2. One logical transfer sized for the whole recording:
  *      NumSweeps = duration / sweep_time, then GUI line 2730's
  *      ceil((NumSweeps+40)*LASN*2*LANR*LANT/512)*512 + 4096 bytes. libusb may
@@ -452,18 +455,67 @@ CaptureMetadata RadarSession::captureIq(const CaptureConfig& cfg,
         return total;
     };
 
-    // ---- 3. The recording --------------------------------------------------
+    // ---- 3. Configure, drain, reconfigure ----------------------------------
     //
-    // configure() ONCE, then the device is left alone for the whole transfer.
-    // An earlier implementation re-sent all 22 command packets before every
-    // 30 KB read, hundreds of times per capture. That mirrors the GUI's *display*
-    // loop, which reconfigures per frame only because it polls the UI for live
-    // changes; Record deliberately does not. Re-triggering the sweep generator
-    // mid-stream is what produced one live sweep per read followed by the mixer
-    // output decaying to DC.
+    // configure() is sent ONCE per phase and the device is left alone for the
+    // whole timed transfer. An earlier implementation re-sent all 22 command
+    // packets before every 30 KB read, hundreds of times per capture;
+    // re-triggering the sweep generator mid-stream produced one live sweep per
+    // read followed by the mixer output decaying to DC. That stays fixed — the
+    // drain below happens strictly BEFORE the timed capture begins.
+    //
+    // Why the drain exists: the board free-runs into the EP6 FIFO regardless of
+    // whether the host reads it, so the first bytes of a cold configure-then-read
+    // are data produced under the PREVIOUS configuration. The fixed 4096-byte
+    // discard below is a preamble skip copied from GUI line 2734, not a flush —
+    // if more than that is queued, stale-config samples land in the capture, and
+    // on a short capture the whole file can predate the change. See
+    // CaptureConfig::drain_sweeps for why the GUI never hits this.
+    using clock = std::chrono::steady_clock;
+
     configure(cfg);
 
-    using clock = std::chrono::steady_clock;
+    std::size_t drain_bytes = 0;
+    bool drain_completed = true;
+    if (cfg.drain_sweeps > 0) {
+        const std::size_t drain_target =
+            static_cast<std::size_t>(cfg.drain_sweeps) * bytes_per_sweep;
+        std::vector<std::uint8_t> scratch(kBulkPacketBytes * 64, 0);
+        const auto drain_deadline =
+            clock::now() + std::chrono::milliseconds(cfg.drain_timeout_ms);
+
+        while (drain_bytes < drain_target) {
+            if (clock::now() >= drain_deadline) {
+                drain_completed = false;
+                break;
+            }
+            const std::size_t remaining = drain_target - drain_bytes;
+            // Same whole-packet rule as the capture read: a bulk IN request that
+            // is not a multiple of the max packet size overflows the moment the
+            // device sends a full packet into a short remainder.
+            std::size_t request = std::min(scratch.size(), remaining);
+            request = (request / kBulkPacketBytes) * kBulkPacketBytes;
+            if (request == 0) break;  // less than one packet left to ask for
+
+            const std::size_t got = usb_.bulkRead(kEpInBulk, scratch.data(),
+                                                   request, cfg.bulk_timeout_ms);
+            drain_bytes += got;
+            if (got < request) break;  // short read — FIFO is empty, we are current
+        }
+        std::fprintf(stderr,
+                     "[pupradar] drained %zu bytes (%d sweeps requested)%s\n",
+                     drain_bytes, cfg.drain_sweeps,
+                     drain_completed ? "" : " — hit drain timeout");
+
+        // Reassert the parameters, as every iteration of the GUI's loop does.
+        // A command swallowed while stale data was still draining out would
+        // otherwise leave the capture on the old settings.
+        if (cfg.reconfigure_after_drain) {
+            configure(cfg);
+        }
+    }
+
+    // ---- 4. The recording --------------------------------------------------
     const auto t_start = clock::now();
 
     // One logical transfer: libusb may satisfy a multi-megabyte bulk request in
@@ -496,6 +548,9 @@ CaptureMetadata RadarSession::captureIq(const CaptureConfig& cfg,
     md.bytes_captured           = total_bytes > kStalePreambleBytes
                                       ? total_bytes - kStalePreambleBytes : 0;
     md.reads_completed          = reads_done;
+    md.drain_sweeps_requested   = cfg.drain_sweeps;
+    md.drain_bytes_discarded    = drain_bytes;
+    md.drain_completed          = drain_completed;
     md.board_info_words         = last_board_info_;
     md.firmware_path            = fw_path_;
     md.timestamp_utc            = isoTimestampUtcNow();

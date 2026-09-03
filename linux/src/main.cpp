@@ -53,6 +53,12 @@ void printUsage(const char* prog) {
         "  --bulk-timeout-ms <ms>    Bulk-read timeout per chunk (default 2000)\n"
         "  --cmd-delay-us <us>       Settling delay after each command packet (default 0).\n"
         "                            Raise it if the board ignores parameters or returns filler.\n"
+        "  --drain-sweeps <n>        Sweeps to read and discard after configuring, before the\n"
+        "                            timed capture (default 64, the GUI's per-frame value).\n"
+        "                            0 disables the drain. Raise it if a changed --rx/--tx\n"
+        "                            still shows up a run or two late.\n"
+        "  --drain-timeout-ms <ms>   Upper bound on the drain (default 1000)\n"
+        "  --no-reconfigure-after-drain  Do not re-send the parameters after draining\n"
         "  -h, --help                Show this help\n";
 }
 
@@ -67,6 +73,9 @@ public:
             }
             // Valueless flags must be checked before the "needs a value" test.
             if (a == "--download-firmware") { download_firmware_ = true; continue; }
+            if (a == "--no-reconfigure-after-drain") {
+                reconfigure_after_drain_ = false; continue;
+            }
             if (i + 1 >= argc) {
                 throw std::runtime_error("Missing value for " + a);
             }
@@ -75,6 +84,7 @@ public:
     }
     bool        help() const { return help_; }
     bool        downloadFirmware() const { return download_firmware_; }
+    bool        reconfigureAfterDrain() const { return reconfigure_after_drain_; }
     bool        has(const std::string& k) const { return kv_.count(k) != 0; }
     std::string get(const std::string& k, const std::string& def = "") const {
         auto it = kv_.find(k); return it == kv_.end() ? def : it->second;
@@ -91,6 +101,7 @@ public:
 private:
     bool help_ = false;
     bool download_firmware_ = false;
+    bool reconfigure_after_drain_ = true;
     std::map<std::string, std::string> kv_;
 };
 
@@ -114,6 +125,13 @@ int main(int argc, char** argv) try {
     cfg.tx_mask         = static_cast<std::uint8_t>(args.getInt("tx", 1));
     cfg.rx_mask         = static_cast<std::uint8_t>(args.getInt("rx", 1));
     cfg.bulk_timeout_ms = args.getUint  ("bulk-timeout-ms", 2000);
+    cfg.drain_sweeps    = args.getInt   ("drain-sweeps", 64);
+    cfg.drain_timeout_ms = args.getUint ("drain-timeout-ms", 1000);
+    cfg.reconfigure_after_drain = args.reconfigureAfterDrain();
+    if (cfg.drain_sweeps < 0) {
+        std::cerr << "Error: --drain-sweeps must be >= 0 (0 disables the drain).\n";
+        return 2;
+    }
 
     const std::string out_base    = args.get("out");
     const std::string firmware    = args.get("firmware", "firmware/SDR_USB_FW.hex");
@@ -141,6 +159,9 @@ int main(int argc, char** argv) try {
               << " tx_mask=0x" << std::hex << +cfg.tx_mask
               << " rx_mask=0x" << +cfg.rx_mask << std::dec << "\n";
     std::cout << "[pupradar] cmd delay: " << cmd_delay_us << " us\n";
+    std::cout << "[pupradar] drain: "     << cfg.drain_sweeps << " sweeps (max "
+              << cfg.drain_timeout_ms     << " ms)"
+              << (cfg.reconfigure_after_drain ? ", reconfigure after" : "") << "\n";
 
     pupradar::UsbDevice    usb;
     pupradar::RadarSession session(usb, firmware);

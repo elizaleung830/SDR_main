@@ -20,6 +20,35 @@ struct CaptureConfig {
     Modulation      modulation     = Modulation::Sawtooth;
     double          duration_s     = 5.0;
     unsigned int    bulk_timeout_ms = 2000;
+
+    /// Sweeps to read and discard between configure() and the real capture.
+    ///
+    /// The board free-runs into the EP6 FIFO whether or not the host reads, so
+    /// a cold configure-then-read returns data produced under the PREVIOUS
+    /// configuration — which is why a changed Rx mask appeared to take effect
+    /// only one or two runs later. The GUI never hits this: Record is
+    /// unreachable until Start has been pressed (PUPradarGUI.m:57 disables the
+    /// recorder panel, :195 is the only enable, immediately before the loop at
+    /// :203), and that loop re-sends the whole configuration and drains 64
+    /// sweeps (:244) continuously, so every Record follows a fresh drain by
+    /// milliseconds.
+    ///
+    /// 64 mirrors the GUI's per-frame NumSweeps. Set to 0 to disable the drain
+    /// and get the old cold-read behaviour back.
+    int             drain_sweeps    = 64;
+
+    /// Upper bound on the drain, in milliseconds. The drain stops early on a
+    /// short read (FIFO empty); this only bounds the pathological case of a
+    /// board that keeps handing back full packets forever.
+    unsigned int    drain_timeout_ms = 1000;
+
+    /// Re-send the configuration after draining, before the timed capture.
+    ///
+    /// The GUI's loop sends the full parameter set every iteration, so the
+    /// settings are always reasserted immediately before a Record. Cheap
+    /// insurance against a command that was swallowed while stale data was
+    /// still draining out.
+    bool            reconfigure_after_drain = true;
 };
 
 struct CaptureMetadata {
@@ -38,6 +67,10 @@ struct CaptureMetadata {
     // What we measured
     std::size_t     bytes_captured;
     std::size_t     reads_completed;
+    // Pre-capture drain: what was configured, and what it actually discarded.
+    int             drain_sweeps_requested = 0;
+    std::size_t     drain_bytes_discarded  = 0;
+    bool            drain_completed        = false;  // false = hit the timeout
     // Board info from 0xFA00 response (raw, host-byte-order uint16 dump,
     // first 16 16-bit words from the info region — let user verify modelcode)
     std::vector<std::uint16_t> board_info_words;

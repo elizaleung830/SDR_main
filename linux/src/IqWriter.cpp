@@ -59,6 +59,9 @@ std::string serializeMetadataJson(const CaptureMetadata& md) {
     o << "  \"actual_duration_s\": "  << md.actual_duration_s         << ",\n";
     o << "  \"bytes_captured\": "     << md.bytes_captured            << ",\n";
     o << "  \"reads_completed\": "    << md.reads_completed           << ",\n";
+    o << "  \"drain_sweeps_requested\": " << md.drain_sweeps_requested << ",\n";
+    o << "  \"drain_bytes_discarded\": "  << md.drain_bytes_discarded  << ",\n";
+    o << "  \"drain_completed\": "    << (md.drain_completed ? "true" : "false") << ",\n";
     o << "  \"sample_dtype\": \"int16_interleaved_iq\",\n";
     o << "  \"endian\": \"little\",\n";
     o << "  \"board_info_words_hex\": [";
