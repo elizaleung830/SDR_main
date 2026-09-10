@@ -196,7 +196,7 @@ end
 function Writes = send(Writes, AddrHex, Byte, Label, handles, opts)
 % One PLL byte write: the MCU expects 1024 copies of (address | byte).
 Word = hex2dec(AddrHex) + Byte;
-Writes(end+1, :) = [Word, Byte]; %#ok<AGROW>
+Writes(end+1, :) = [Word, Byte];
 
 if opts.Verbose
     fprintf('  %-16s  %s -> 0x%s\n', Label, AddrHex, dec2hex(Word, 4));

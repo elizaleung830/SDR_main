@@ -92,7 +92,8 @@ if LANT == 1          % Device has 1 Tx channel
                     DataMatrixTx1(8:8:LASN*8, 1:NumSweeps);
                 ComplexDataTx2 = zeros(LASN*4, NumSweeps);
             end
-        catch
+        catch err
+            reportDecodeFailure(err, RawData, LASN, LANR, LANT, NumSweeps);
             ComplexDataTx1 = zeros(LASN*4, NumSweeps);
             ComplexDataTx2 = zeros(LASN*4, NumSweeps);
             return
@@ -129,7 +130,8 @@ if LANT == 1          % Device has 1 Tx channel
                     DataMatrixTx2(8:8:LASN*8, 1:NumSweeps)*1i;
                 ComplexDataTx1 = zeros(LASN*4, NumSweeps);
             end
-        catch
+        catch err
+            reportDecodeFailure(err, RawData, LASN, LANR, LANT, NumSweeps);
             ComplexDataTx1 = zeros(LASN*4, NumSweeps);
             ComplexDataTx2 = zeros(LASN*4, NumSweeps);
             return
@@ -184,9 +186,49 @@ else  % Device has 2 Tx channels
             ComplexDataTx2(LASN*3+1:LASN*4, 1:NumSweeps) = DataMatrixTx2(7:8:LASN*8-1, 1:NumSweeps)*4 + ...
                 DataMatrixTx2(8:8:LASN*8, 1:NumSweeps)*4*1i;
         end
-    catch
+    catch err
+        reportDecodeFailure(err, RawData, LASN, LANR, LANT, NumSweeps);
         ComplexDataTx1 = zeros(LASN*4, NumSweeps);
         ComplexDataTx2 = zeros(LASN*4, NumSweeps);
         return
     end
+end
+end
+
+
+function reportDecodeFailure(err, RawData, LASN, LANR, LANT, NumSweeps)
+%REPORTDECODEFAILURE  Explain a swallowed decode error instead of hiding it.
+%
+% The GUI's bare catch returns zeros(LASN*4, NumSweeps) with no message, so a
+% configuration mismatch looks identical to a dead radar. Surface enough to
+% tell them apart.
+Tx1Count = sum(RawData >= 49152);
+Tx2Count = sum(RawData < 49150 & RawData >= 32768);
+WordsPerSweep = LASN * 2 * LANR * LANT;
+
+warning('GetComplexData:decodeFailed', ...
+    ['Decode failed - returning zeros(%d, %d).\n' ...
+     '  Reason      : %s\n' ...
+     '  Raw samples : %d\n' ...
+     '  Tx1 headers : %d   (>=49152)\n' ...
+     '  Tx2 headers : %d   (32768..49149)\n' ...
+     '  Expecting   : %d words/sweep (LASN=%d x 2 x %d Rx x %d Tx)\n' ...
+     '  If both header counts are 0, the board sent no framed data.\n' ...
+     '  If the header spacing does not match the expected words/sweep, the\n' ...
+     '  MCU is streaming a different Tx/Rx layout than these handles assume -\n' ...
+     '  call Send_Basic_Parameter(handles) before acquiring.'], ...
+    LASN*4, NumSweeps, err.message, numel(RawData), ...
+    Tx1Count, Tx2Count, WordsPerSweep, LASN, LANR, LANT);
+
+% Header spacing is the most direct evidence of the real channel layout.
+Idx = find(RawData >= 32768);
+if numel(Idx) >= 3
+    Stride = median(diff(Idx));
+    fprintf('  Measured header stride: %d words (expected %d).\n', ...
+        Stride, WordsPerSweep);
+    if Stride ~= WordsPerSweep && Stride > 0
+        fprintf('  -> ratio %.3f. The board is not in the configuration you assumed.\n', ...
+            Stride / WordsPerSweep);
+    end
+end
 end
