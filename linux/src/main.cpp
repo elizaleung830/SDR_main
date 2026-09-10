@@ -34,32 +34,48 @@ namespace {
 void printUsage(const char* prog) {
     std::cout <<
         "Usage: " << prog << " --out <basename> [options]\n"
+        "\n"
+        "Captures raw IQ, following the same sequence as the MATLAB\n"
+        "run_GetComplexData.m: PUPradar_initiating -> Send_Basic_Parameter ->\n"
+        "Send_PLL_Sawtooth -> GetComplexData. The options below are exactly the\n"
+        "makeRadarHandles() parameters; nothing else is adjustable.\n"
+        "\n"
         "Options:\n"
-        "  --duration <s>            Capture duration in seconds (default 5)\n"
         "  --out <basename>          Output basename (writes <basename>.bin and .json)\n"
+        "  --sweep-time-index <1-5>  1=0.5ms 2=1ms 3=2ms 4=4ms 5=8ms (default 1)\n"
+        "  --transmitter <name>      Tx1 | Tx2 | Tx1.Tx2 (default Tx1)\n"
+        "  --receiver <name>         Rx1 | Rx2 | Rx3 | Rx4 | Rx1.Rx2 | Rx3.Rx4 |\n"
+        "                            Rx1.Rx2.Rx3.Rx4 (default Rx1)\n"
+        "  --sampling-index <1-4>    1=BASN, 2=BASN/2, 3=BASN/4, 4=BASN/8 (default 1).\n"
+        "                            Samples per sweep follow from the sweep time and\n"
+        "                            receiver count; they are not set directly.\n"
+        "  --num-sweeps <n>          Sweeps to acquire (default 128)\n"
+        "  --fc-low <Hz>             Chirp start frequency (default 24.0e9)\n"
+        "  --fc-high <Hz>            Chirp stop frequency (default 24.25e9)\n"
         "  --firmware <path>         Path to SDR_USB_FW.hex (default: ./firmware/SDR_USB_FW.hex)\n"
-        "  --fc-low <Hz>             Sawtooth low frequency (default 24.0e9)\n"
-        "  --fc-high <Hz>            Sawtooth high frequency (default 24.25e9)\n"
-        "  --sweep-time <1-5>        Sweep-time index: 1=0.5ms 2=1ms 3=2ms 4=4ms 5=8ms (default 2)\n"
-        "  --samp-num <1-4>          Sampling-number index (1=BASN, 2=BASN/2, ... default 1)\n"
-        "  --tx <mask>               Tx mask: 1=Tx1, 2=Tx2, 3=both (default 1)\n"
-        "  --rx <mask>               Rx mask: 1/2/4/8 single, 3=Rx12, 12=Rx34, 15=All (default 1)\n"
-        "  --post-fw-vid <0xNNNN>    Post-firmware VID (default 0x04B4)\n"
-        "  --post-fw-pid <0xNNNN>    Post-firmware PID (default 0x8613)\n"
-        "  --post-fw-vid2 <0xNNNN>   Optional second VID candidate\n"
-        "  --post-fw-pid2 <0xNNNN>   Optional second PID candidate\n"
-        "  --download-firmware       Apply this flag to a board that haven't downloaded the firmware yet. (i.e., when board is in a new power cycle)\n"
-        "  --reenum-timeout-ms <ms>  Re-enumeration wait after firmware load (default 5000)\n"
-        "  --bulk-timeout-ms <ms>    Bulk-read timeout per chunk (default 2000)\n"
-        "  --cmd-delay-us <us>       Settling delay after each command packet (default 0).\n"
-        "                            Raise it if the board ignores parameters or returns filler.\n"
-        "  --drain-sweeps <n>        Sweeps to read and discard after configuring, before the\n"
-        "                            timed capture (default 64, the GUI's per-frame value).\n"
-        "                            0 disables the drain. Raise it if a changed --rx/--tx\n"
-        "                            still shows up a run or two late.\n"
-        "  --drain-timeout-ms <ms>   Upper bound on the drain (default 1000)\n"
-        "  --no-reconfigure-after-drain  Do not re-send the parameters after draining\n"
         "  -h, --help                Show this help\n";
+}
+
+/// Transmitter name -> (command value, channel count).
+/// Mirrors makeRadarHandles / PUPradarGUI.m:2000-2021.
+bool parseTransmitter(const std::string& s, std::uint8_t& value, int& count) {
+    if (s == "Tx1")     { value = 1; count = 1; return true; }
+    if (s == "Tx2")     { value = 2; count = 1; return true; }
+    if (s == "Tx1.Tx2") { value = 3; count = 2; return true; }
+    return false;
+}
+
+/// Receiver name -> (command value, channel count).
+/// Mirrors makeRadarHandles / PUPradarGUI.m:2026-2075.
+bool parseReceiver(const std::string& s, std::uint8_t& value, int& count) {
+    if (s == "Rx1")             { value =  1; count = 1; return true; }
+    if (s == "Rx2")             { value =  2; count = 1; return true; }
+    if (s == "Rx3")             { value =  4; count = 1; return true; }
+    if (s == "Rx4")             { value =  8; count = 1; return true; }
+    if (s == "Rx1.Rx2")         { value =  3; count = 2; return true; }
+    if (s == "Rx3.Rx4")         { value = 12; count = 2; return true; }
+    if (s == "Rx1.Rx2.Rx3.Rx4") { value = 15; count = 4; return true; }
+    return false;
 }
 
 class Args {
@@ -71,11 +87,6 @@ public:
             if (a.rfind("--", 0) != 0) {
                 throw std::runtime_error("Unexpected positional argument: " + a);
             }
-            // Valueless flags must be checked before the "needs a value" test.
-            if (a == "--download-firmware") { download_firmware_ = true; continue; }
-            if (a == "--no-reconfigure-after-drain") {
-                reconfigure_after_drain_ = false; continue;
-            }
             if (i + 1 >= argc) {
                 throw std::runtime_error("Missing value for " + a);
             }
@@ -83,8 +94,6 @@ public:
         }
     }
     bool        help() const { return help_; }
-    bool        downloadFirmware() const { return download_firmware_; }
-    bool        reconfigureAfterDrain() const { return reconfigure_after_drain_; }
     bool        has(const std::string& k) const { return kv_.count(k) != 0; }
     std::string get(const std::string& k, const std::string& def = "") const {
         auto it = kv_.find(k); return it == kv_.end() ? def : it->second;
@@ -100,8 +109,6 @@ public:
     }
 private:
     bool help_ = false;
-    bool download_firmware_ = false;
-    bool reconfigure_after_drain_ = true;
     std::map<std::string, std::string> kv_;
 };
 
@@ -116,64 +123,87 @@ int main(int argc, char** argv) try {
         return 2;
     }
 
+    // Every option below is a makeRadarHandles() parameter. Operational
+    // details the MATLAB path does not expose either (USB IDs, timeouts,
+    // re-enumeration budget) are fixed constants further down.
+    const std::string transmitter = args.get("transmitter", "Tx1");
+    const std::string receiver    = args.get("receiver",    "Rx1");
+
     pupradar::CaptureConfig cfg;
-    cfg.duration_s      = args.getDouble("duration", 5.0);
-    cfg.f_low_hz        = args.getDouble("fc-low",   24.0e9);
-    cfg.f_high_hz       = args.getDouble("fc-high",  24.25e9);
-    cfg.sweep_time_idx  = args.getInt   ("sweep-time", 2);
-    cfg.samp_num_idx    = args.getInt   ("samp-num",   1);
-    cfg.tx_mask         = static_cast<std::uint8_t>(args.getInt("tx", 1));
-    cfg.rx_mask         = static_cast<std::uint8_t>(args.getInt("rx", 1));
-    cfg.bulk_timeout_ms = args.getUint  ("bulk-timeout-ms", 2000);
-    cfg.drain_sweeps    = args.getInt   ("drain-sweeps", 64);
-    cfg.drain_timeout_ms = args.getUint ("drain-timeout-ms", 1000);
-    cfg.reconfigure_after_drain = args.reconfigureAfterDrain();
-    if (cfg.drain_sweeps < 0) {
-        std::cerr << "Error: --drain-sweeps must be >= 0 (0 disables the drain).\n";
+    cfg.f_low_hz       = args.getDouble("fc-low",  24.0e9);
+    cfg.f_high_hz      = args.getDouble("fc-high", 24.25e9);
+    cfg.sweep_time_idx = args.getInt("sweep-time-index", 1);
+    cfg.samp_num_idx   = args.getInt("sampling-index",   1);
+    cfg.num_sweeps     = args.getInt("num-sweeps",     128);
+
+    int n_tx = 0, n_rx = 0;
+    if (!parseTransmitter(transmitter, cfg.tx_mask, n_tx)) {
+        std::cerr << "Error: --transmitter must be Tx1, Tx2 or Tx1.Tx2 (got '"
+                  << transmitter << "').\n";
+        return 2;
+    }
+    if (!parseReceiver(receiver, cfg.rx_mask, n_rx)) {
+        std::cerr << "Error: --receiver must be Rx1..Rx4, Rx1.Rx2, Rx3.Rx4 or "
+                     "Rx1.Rx2.Rx3.Rx4 (got '" << receiver << "').\n";
+        return 2;
+    }
+    if (cfg.sweep_time_idx < 1 || cfg.sweep_time_idx > 5) {
+        std::cerr << "Error: --sweep-time-index must be 1..5.\n";
+        return 2;
+    }
+    if (cfg.samp_num_idx < 1 || cfg.samp_num_idx > 4) {
+        std::cerr << "Error: --sampling-index must be 1..4.\n";
+        return 2;
+    }
+    if (cfg.num_sweeps < 1) {
+        std::cerr << "Error: --num-sweeps must be >= 1.\n";
+        return 2;
+    }
+    if (cfg.f_high_hz <= cfg.f_low_hz) {
+        std::cerr << "Error: --fc-high must be above --fc-low.\n";
         return 2;
     }
 
-    const std::string out_base    = args.get("out");
-    const std::string firmware    = args.get("firmware", "firmware/SDR_USB_FW.hex");
-    const unsigned int reenum_ms  = args.getUint("reenum-timeout-ms", 5000);
-    const unsigned int cmd_delay_us = args.getUint("cmd-delay-us", 0);
+    const std::string out_base = args.get("out");
+    const std::string firmware = args.get("firmware", "firmware/SDR_USB_FW.hex");
 
-    std::vector<pupradar::IUsbBackend::VidPid> post_fw;
-    post_fw.push_back({
-        static_cast<std::uint16_t>(args.getInt("post-fw-vid", 0x04B4)),
-        static_cast<std::uint16_t>(args.getInt("post-fw-pid", 0x8613))
-    });
-    if (args.has("post-fw-vid2") && args.has("post-fw-pid2")) {
-        post_fw.push_back({
-            static_cast<std::uint16_t>(args.getInt("post-fw-vid2", 0)),
-            static_cast<std::uint16_t>(args.getInt("post-fw-pid2", 0))
-        });
-    }
+    // Fixed operational constants — the MATLAB path hard-codes these too.
+    // usbcheckchip checks vID 1204 (0x04B4) / pID 34323 (0x8613); see
+    // PUPradar_initiating.m.
+    constexpr unsigned int kReenumTimeoutMs = 5000;
+    std::vector<pupradar::IUsbBackend::VidPid> post_fw{{0x04B4, 0x8613}};
 
-    std::cout << "[pupradar] firmware: "  << firmware  << "\n";
-    std::cout << "[pupradar] out: "       << out_base  << ".bin / .json\n";
-    std::cout << "[pupradar] capture: "   << cfg.duration_s << " s, "
-              << cfg.f_low_hz/1e9 << ".."  << cfg.f_high_hz/1e9 << " GHz, "
-              << "sweep_idx=" << cfg.sweep_time_idx
-              << " samp_idx=" << cfg.samp_num_idx
-              << " tx_mask=0x" << std::hex << +cfg.tx_mask
-              << " rx_mask=0x" << +cfg.rx_mask << std::dec << "\n";
-    std::cout << "[pupradar] cmd delay: " << cmd_delay_us << " us\n";
-    std::cout << "[pupradar] drain: "     << cfg.drain_sweeps << " sweeps (max "
-              << cfg.drain_timeout_ms     << " ms)"
-              << (cfg.reconfigure_after_drain ? ", reconfigure after" : "") << "\n";
+    // Settling delay after each command packet. MATLAB gets milliseconds of
+    // this for free — miniradarputdata constructs and destroys a whole
+    // CCyUSBDevice per command (miniradarputdata.cpp:35-41) — whereas libusb
+    // writes all 22 back to back over a persistent handle. Raise this if the
+    // board ever ignores a parameter.
+    constexpr unsigned int kCommandDelayUs = 0;
+
+    const int samples_per_sweep =
+        pupradar::samplesPerSweep(cfg.sweep_time_idx, cfg.samp_num_idx, n_rx);
+    const double sweep_time_s = pupradar::sweepTimeFromIndex(cfg.sweep_time_idx);
+
+    std::cout << "[pupradar] firmware: " << firmware << "\n";
+    std::cout << "[pupradar] out: "      << out_base << ".bin / .json\n";
+    std::cout << "[pupradar] config: "   << n_tx << " Tx / " << n_rx << " Rx ("
+              << transmitter << ", " << receiver << "), "
+              << sweep_time_s * 1e3 << " ms sweep, "
+              << samples_per_sweep  << " samples/sweep/Rx, "
+              << cfg.num_sweeps     << " sweeps\n";
+    std::cout << "[pupradar] chirp: "    << cfg.f_low_hz/1e9 << ".."
+              << cfg.f_high_hz/1e9      << " GHz\n";
 
     pupradar::UsbDevice    usb;
     pupradar::RadarSession session(usb, firmware);
-    // Set before bring-up so the board-info handshake gets the same pacing.
-    session.setCommandDelayUs(cmd_delay_us);
-    if (args.downloadFirmware()) {
-        std::cout << "[pupradar] initializing (open → claim → firmware → reopen)…\n";
-        session.initialize(post_fw, reenum_ms);
-    } else {
-        std::cout << "[pupradar] attaching to a running board…\n";
-        session.attachRunning(post_fw[0].vid, post_fw[0].pid);
-    }
+    session.setCommandDelayUs(kCommandDelayUs);
+
+    // Always the full bring-up with a firmware download, matching
+    // PUPradar_initiating.m — which run_GetComplexData.m calls on every run.
+    // The Cypress loader holds the 8051 in reset while it writes, so the board
+    // starts from a known state and cannot carry stale sweeps in its FIFO.
+    std::cout << "[pupradar] initializing (open → claim → firmware → reopen)…\n";
+    session.initialize(post_fw, kReenumTimeoutMs);
 
     std::printf("[pupradar] board info (uint16 words, hex): ");
     for (auto w : session.lastBoardInfo()) std::printf("%04X ", w);
@@ -190,15 +220,15 @@ int main(int argc, char** argv) try {
         std::printf("[pupradar] warning: FA05 signature not found in board info\n");
     }
 
-    std::cout << "[pupradar] configuring sawtooth FMCW…\n";
-    session.configure(cfg);
-
     pupradar::IqWriter writer(out_base);
     auto sink = [&writer](const std::uint8_t* d, std::size_t n) {
         writer.write(d, n);
     };
 
-    std::cout << "[pupradar] capturing for " << cfg.duration_s << " s…\n";
+    // captureIq configures (Send_Basic_Parameter + Send_PLL_Sawtooth) and then
+    // reads, in that order — no separate configure() call here.
+    std::cout << "[pupradar] configuring and capturing " << cfg.num_sweeps
+              << " sweeps (" << cfg.num_sweeps * sweep_time_s << " s)…\n";
     auto md = session.captureIq(cfg, sink);
     writer.finalize(md);
 

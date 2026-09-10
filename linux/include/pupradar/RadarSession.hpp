@@ -18,7 +18,11 @@ struct CaptureConfig {
     std::uint8_t    tx_mask        = 0x01;     // Tx1 only
     std::uint8_t    rx_mask        = 0x01;     // Rx1 only
     Modulation      modulation     = Modulation::Sawtooth;
-    double          duration_s     = 5.0;
+    /// Sweeps to acquire — the MATLAB handles.NumSweeps, not a duration.
+    /// GetComplexData takes a sweep count and derives the transfer size from
+    /// it (PUPradarGUI.m:2730); expressing this as seconds meant the two
+    /// implementations sized their transfers from different quantities.
+    int             num_sweeps      = 128;
     unsigned int    bulk_timeout_ms = 2000;
 
     /// Sweeps to read and discard between configure() and the real capture.
@@ -33,9 +37,14 @@ struct CaptureConfig {
     /// sweeps (:244) continuously, so every Record follows a fresh drain by
     /// milliseconds.
     ///
-    /// 64 mirrors the GUI's per-frame NumSweeps. Set to 0 to disable the drain
-    /// and get the old cold-read behaviour back.
-    int             drain_sweeps    = 64;
+    /// Default 0 (off), because the standard bring-up now always downloads the
+    /// firmware, and the Cypress loader holds the 8051 in reset while it writes
+    /// (Protocol.hpp kCpucsReset). A reset MCU cannot have left stale sweeps in
+    /// the FIFO, so the drain has nothing to do. run_GetComplexData.m works for
+    /// exactly this reason: PUPradar_initiating downloads every run and never
+    /// drains. Set to 64 (the GUI's per-frame NumSweeps) if you ever acquire
+    /// without a preceding firmware download.
+    int             drain_sweeps    = 0;
 
     /// Upper bound on the drain, in milliseconds. The drain stops early on a
     /// short read (FIFO empty); this only bounds the pathological case of a
@@ -62,7 +71,8 @@ struct CaptureMetadata {
     int             num_rx;
     std::uint8_t    tx_mask;
     std::uint8_t    rx_mask;
-    double          requested_duration_s;
+    int             num_sweeps;
+    double          requested_duration_s;   // num_sweeps * sweep_time_s
     double          actual_duration_s;
     // What we measured
     std::size_t     bytes_captured;

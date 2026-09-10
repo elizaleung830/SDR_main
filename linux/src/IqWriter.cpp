@@ -55,6 +55,7 @@ std::string serializeMetadataJson(const CaptureMetadata& md) {
     o << "  \"num_rx\": "             << md.num_rx                    << ",\n";
     o << "  \"tx_mask\": "            << static_cast<int>(md.tx_mask) << ",\n";
     o << "  \"rx_mask\": "            << static_cast<int>(md.rx_mask) << ",\n";
+    o << "  \"num_sweeps\": "         << md.num_sweeps                << ",\n";
     o << "  \"requested_duration_s\": " << md.requested_duration_s    << ",\n";
     o << "  \"actual_duration_s\": "  << md.actual_duration_s         << ",\n";
     o << "  \"bytes_captured\": "     << md.bytes_captured            << ",\n";
