@@ -34,10 +34,9 @@ Deployed. On the Pi, install the udev rule once:
 
 Then test:
     cd $DEST
-    ./pupradar_capture --duration 5 --out /tmp/cap
+    ./pupradar_capture --download-firmware --duration 5 --out /tmp/cap
 
-After the first run, find the post-firmware VID/PID with 'lsusb' and pass
-them on subsequent runs:
-    ./pupradar_capture --post-fw-vid 0x04B4 --post-fw-pid 0xXXXX \\
-                       --duration 5 --out /tmp/cap
+If the board does not reappear after the firmware load, find its
+post-firmware VID/PID with 'lsusb' and set kPostFirmwareVid /
+kPostFirmwarePid in include/pupradar/Protocol.hpp, then rebuild.
 EOF

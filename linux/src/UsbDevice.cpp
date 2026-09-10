@@ -343,7 +343,8 @@ void UsbDevice::reopenAfterRenumeration(const VidPid* candidates,
             << std::setw(4) << std::setfill('0') << candidates[i].pid;
     }
     oss << "\n  Currently visible: " << listVisibleDevices(ctx_)
-        << "\n  Hint: pass the correct VID:PID above via --post-fw-vid / --post-fw-pid";
+        << "\n  Hint: check the post-firmware VID:PID with lsusb and update "
+           "kPostFirmwareVid / kPostFirmwarePid in Protocol.hpp";
     throw UsbError(oss.str());
 }
 

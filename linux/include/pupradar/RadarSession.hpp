@@ -19,7 +19,6 @@ struct CaptureConfig {
     std::uint8_t    rx_mask        = 0x01;     // Rx1 only
     Modulation      modulation     = Modulation::Sawtooth;
     double          duration_s     = 5.0;
-    unsigned int    bulk_timeout_ms = 2000;
 
     /// Sweeps to read and discard between configure() and the real capture.
     ///
@@ -33,22 +32,15 @@ struct CaptureConfig {
     /// sweeps (:244) continuously, so every Record follows a fresh drain by
     /// milliseconds.
     ///
-    /// 64 mirrors the GUI's per-frame NumSweeps. Set to 0 to disable the drain
-    /// and get the old cold-read behaviour back.
-    int             drain_sweeps    = 64;
+    /// Default 0 disables the drain (cold read). 64 mirrors the GUI's
+    /// per-frame NumSweeps. When the drain runs, the configuration is re-sent
+    /// afterwards, as every iteration of the GUI's loop does.
+    int             drain_sweeps    = 0;
 
     /// Upper bound on the drain, in milliseconds. The drain stops early on a
     /// short read (FIFO empty); this only bounds the pathological case of a
     /// board that keeps handing back full packets forever.
     unsigned int    drain_timeout_ms = 1000;
-
-    /// Re-send the configuration after draining, before the timed capture.
-    ///
-    /// The GUI's loop sends the full parameter set every iteration, so the
-    /// settings are always reasserted immediately before a Record. Cheap
-    /// insurance against a command that was swallowed while stale data was
-    /// still draining out.
-    bool            reconfigure_after_drain = true;
 };
 
 struct CaptureMetadata {

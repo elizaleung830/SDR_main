@@ -12,6 +12,9 @@ namespace pupradar {
 // USB identification
 constexpr std::uint16_t kPreFirmwareVid = 0x04B4;  // Cypress
 constexpr std::uint16_t kPreFirmwarePid = 0x8613;  // Unprogrammed FX2LP default
+// IDs the board presents once SDR_USB_FW.hex is running (used by pupradar_capture).
+constexpr std::uint16_t kPostFirmwareVid = 0x04B4;
+constexpr std::uint16_t kPostFirmwarePid = 0x8613;
 
 // Endpoints (firmware-defined; do not discover)
 constexpr std::uint8_t kEpOutBulk = 0x02;  // EP2 OUT — host → MCU commands

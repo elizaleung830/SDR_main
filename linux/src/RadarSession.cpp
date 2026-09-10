@@ -21,6 +21,7 @@ constexpr std::uint8_t kCtrlOut   = 0x40;  // vendor, host→device, recipient=d
 constexpr std::uint8_t kCtrlIn    = 0xC0;  // vendor, device→host, recipient=device
 constexpr unsigned int kCtrlTimeoutMs = 1000;
 constexpr unsigned int kBulkOutTimeoutMs = 1000;
+constexpr unsigned int kBulkInTimeoutMs = 20000;
 
 // GUI line 2672: DataLength = 512 + 2048
 constexpr std::size_t kBoardInfoReadBytes = 512 + 2048;
@@ -373,7 +374,7 @@ void RadarSession::configure(const CaptureConfig& cfg) {
  * re-triggers the sweep generator mid-stream, which yields one live sweep per
  * read followed by the mixer output decaying to DC.
  *
- * @param cfg  Capture configuration used for buffer sizing, run duration, and bulk timeout.
+ * @param cfg  Capture configuration used for buffer sizing and run duration.
  *             Applied by this function; no prior configure() call is needed.
  * @param sink Called once with the de-preambled capture (pointer into an
  *             internal buffer, valid only for the duration of the call).
@@ -438,7 +439,7 @@ CaptureMetadata RadarSession::captureIq(const CaptureConfig& cfg,
     // covers the case where the device answers with a partial packet and leaves
     // total_bytes off a 512-byte boundary.
     const unsigned int transfer_timeout_ms =
-        static_cast<unsigned int>(cfg.duration_s * 1000.0) + cfg.bulk_timeout_ms;
+        static_cast<unsigned int>(cfg.duration_s * 1000.0) + kBulkInTimeoutMs;
     auto readCapture = [&](std::size_t& reads_out) -> std::size_t {
         std::size_t total = 0;
         while (total < capture_bytes) {
@@ -498,7 +499,7 @@ CaptureMetadata RadarSession::captureIq(const CaptureConfig& cfg,
             if (request == 0) break;  // less than one packet left to ask for
 
             const std::size_t got = usb_.bulkRead(kEpInBulk, scratch.data(),
-                                                   request, cfg.bulk_timeout_ms);
+                                                   request, kBulkInTimeoutMs);
             drain_bytes += got;
             if (got < request) break;  // short read — FIFO is empty, we are current
         }
@@ -510,9 +511,7 @@ CaptureMetadata RadarSession::captureIq(const CaptureConfig& cfg,
         // Reassert the parameters, as every iteration of the GUI's loop does.
         // A command swallowed while stale data was still draining out would
         // otherwise leave the capture on the old settings.
-        if (cfg.reconfigure_after_drain) {
-            configure(cfg);
-        }
+        configure(cfg);
     }
 
     // ---- 4. The recording --------------------------------------------------

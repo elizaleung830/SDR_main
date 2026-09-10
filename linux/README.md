@@ -80,14 +80,7 @@ lsusb
 # Look for the new Cypress (vendor 04b4) entry that wasn't there before firmware load.
 ```
 
-Then pass it explicitly:
-
-```bash
-./pupradar_capture --post-fw-vid 0x04B4 --post-fw-pid 0xNNNN \
-                   --duration 5 --out /tmp/cap
-```
-
-Once confirmed, edit `99-pupradar.rules` to match and reinstall, and add the value to `main.cpp` defaults (or document it in your operator notes).
+Then set `kPostFirmwareVid` / `kPostFirmwarePid` in `include/pupradar/Protocol.hpp` to match and rebuild. Edit `99-pupradar.rules` to match as well and reinstall it.
 
 ## CLI reference
 
@@ -101,11 +94,10 @@ pupradar_capture --out <basename> [options]
   --samp-num <1-4>          Sampling-number index, 1=BASN, 2=BASN/2, ... (default 1)
   --tx <mask>               1=Tx1, 2=Tx2, 3=Both (default 1)
   --rx <mask>               1/2/4/8=single, 3=Rx12, 12=Rx34, 15=All (default 1)
-  --post-fw-vid <0xNNNN>    Post-firmware VID (default 0x04B4)
-  --post-fw-pid <0xNNNN>    Post-firmware PID (default 0x1004; CONFIRM with lsusb)
-  --post-fw-vid2/--pid2     Optional second candidate
-  --reenum-timeout-ms <ms>  Re-enumeration wait (default 5000)
-  --bulk-timeout-ms <ms>    Bulk-read timeout per chunk (default 2000)
+  --download-firmware       Download firmware first (board freshly power-cycled)
+  --cmd-delay-us <us>       Settling delay after each command packet (default 2000)
+  --drain-sweeps <n>        Sweeps to discard before the capture (default 0 = no drain)
+  --drain-timeout-ms <ms>   Upper bound on the drain (default 1000)
 ```
 
 ## Output format
