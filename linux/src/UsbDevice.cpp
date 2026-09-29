@@ -11,9 +11,6 @@ namespace pupradar {
 
 namespace {
 
-// How long to wait for the device to come back if a reset re-enumerates it.
-constexpr unsigned int kResetReopenTimeoutMs = 2000;
-
 /**
  * @brief Throws a UsbError whose message includes the libusb error name and code.
  * @param what Short label identifying the failing libusb call.
@@ -124,8 +121,6 @@ void UsbDevice::open(std::uint16_t vid, std::uint16_t pid) {
         oss << "USB device " << std::hex << vid << ":" << pid << " not found";
         throw UsbError(oss.str());
     }
-    last_vid_ = vid;
-    last_pid_ = pid;
 }
 
 /**
@@ -186,30 +181,6 @@ void UsbDevice::setAltSetting(int interface_number, int alt_setting) {
     if (!handle_) throw UsbError("setAltSetting: device not open");
     int rc = libusb_set_interface_alt_setting(handle_, interface_number, alt_setting);
     if (rc != 0) throwLibusb("libusb_set_interface_alt_setting", rc);
-}
-
-/**
- * @brief Issues a USB port reset, returning the chip to its power-on state.
- *
- * @c libusb_reset_device reports @c LIBUSB_ERROR_NOT_FOUND when the device
- * re-enumerated as a result of the reset — the previous handle is then dead and
- * the device must be reopened. That is a normal outcome here rather than a
- * failure, so this method transparently reopens the same VID:PID (recorded by
- * open()) and returns with a usable handle. Firmware already resident in FX2
- * RAM survives the reset.
- *
- * @throws UsbError if the device is not open, the reset fails for any other
- *         reason, or the device does not reappear after re-enumerating.
- */
-void UsbDevice::resetDevice() {
-    if (!handle_) throw UsbError("resetDevice: device not open");
-    int rc = libusb_reset_device(handle_);
-    if (rc == 0) return;
-    if (rc != LIBUSB_ERROR_NOT_FOUND) throwLibusb("libusb_reset_device", rc);
-
-    // Device re-enumerated during the reset — reopen it under the same IDs.
-    const VidPid same{last_vid_, last_pid_};
-    reopenAfterRenumeration(&same, 1, kResetReopenTimeoutMs);
 }
 
 /**

@@ -66,47 +66,98 @@ sudo cp ~/pupradar/99-pupradar.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 
 cd ~/pupradar
-./pupradar_capture --duration 5 --out /tmp/cap
+./pupradar_capture --out /tmp/cap
 ```
 
 ## Discovering the post-firmware VID/PID (one-time)
 
-The Cypress FX2LP boots with a default VID/PID of `04B4:8613`, then re-enumerates after firmware load with VID/PID defined inside `SDR_USB_FW.hex`. The MATLAB driver hides this; libusb does not. The defaults baked into this binary are placeholders.
+The Cypress FX2LP boots with a default VID/PID of `04B4:8613`, then re-enumerates after firmware load with VID/PID defined inside `SDR_USB_FW.hex`. The MATLAB driver hides this behind a fresh per-call device open; libusb holds one persistent handle across the firmware download, so it has to wait for the real re-enumeration explicitly (see `RadarSession::initialize`).
 
-After the first attempted capture (which may fail at the re-enumeration step), inspect:
+The post-firmware VID/PID is a fixed constant in `main.cpp` (`post_fw`), matching every other radar parameter the MATLAB path doesn't expose. If a capture fails at the re-enumeration step, inspect:
 
 ```bash
 lsusb
 # Look for the new Cypress (vendor 04b4) entry that wasn't there before firmware load.
 ```
 
-Then pass it explicitly:
-
-```bash
-./pupradar_capture --post-fw-vid 0x04B4 --post-fw-pid 0xNNNN \
-                   --duration 5 --out /tmp/cap
-```
-
-Once confirmed, edit `99-pupradar.rules` to match and reinstall, and add the value to `main.cpp` defaults (or document it in your operator notes).
+Then update the `post_fw` VID/PID constant in `main.cpp` to match, and edit `99-pupradar.rules` to match too, before rebuilding and reinstalling.
 
 ## CLI reference
 
+Every option below is exactly a `makeRadarHandles()` parameter from the MATLAB
+path — nothing else is adjustable. Operational details MATLAB doesn't expose
+either (post-firmware VID/PID, re-enumeration timeout, command delay) are
+fixed constants in `main.cpp`.
+
 ```
 pupradar_capture --out <basename> [options]
-  --duration <s>            Capture duration (default 5)
-  --firmware <path>         Path to SDR_USB_FW.hex (default ./firmware/SDR_USB_FW.hex)
-  --fc-low <Hz>             Sawtooth low frequency (default 24.0e9)
-  --fc-high <Hz>            Sawtooth high frequency (default 24.25e9)
-  --sweep-time <1-5>        1=0.5ms, 2=1ms, 3=2ms, 4=4ms, 5=8ms (default 2)
-  --samp-num <1-4>          Sampling-number index, 1=BASN, 2=BASN/2, ... (default 1)
-  --tx <mask>               1=Tx1, 2=Tx2, 3=Both (default 1)
-  --rx <mask>               1/2/4/8=single, 3=Rx12, 12=Rx34, 15=All (default 1)
-  --post-fw-vid <0xNNNN>    Post-firmware VID (default 0x04B4)
-  --post-fw-pid <0xNNNN>    Post-firmware PID (default 0x1004; CONFIRM with lsusb)
-  --post-fw-vid2/--pid2     Optional second candidate
-  --reenum-timeout-ms <ms>  Re-enumeration wait (default 5000)
-  --bulk-timeout-ms <ms>    Bulk-read timeout per chunk (default 2000)
+  --sweep-time-index <1-5>  1=0.5ms 2=1ms 3=2ms 4=4ms 5=8ms (default 1)
+  --transmitter <name>      Tx1 | Tx2 | Tx1.Tx2 (default Tx1)
+  --receiver <name>         Rx1 | Rx2 | Rx3 | Rx4 | Rx1.Rx2 | Rx3.Rx4 |
+                             Rx1.Rx2.Rx3.Rx4 (default Rx1)
+  --sampling-index <1-4>    1=BASN, 2=BASN/2, 3=BASN/4, 4=BASN/8 (default 1).
+                             Samples per sweep follow from the sweep time and
+                             receiver count; they are not set directly.
+  --num-sweeps <n>          Sweeps to acquire (default 128)
+  --fc-low <Hz>              Chirp start frequency (default 24.0e9)
+  --fc-high <Hz>             Chirp stop frequency (default 24.25e9)
+  --firmware <path>          Path to SDR_USB_FW.hex (default ./firmware/SDR_USB_FW.hex)
+  --cmd-delay-us <us>        Settling delay after each command packet (default 15000)
+  -h, --help                 Show this help
 ```
+
+`--cmd-delay-us` is the one knob that is not a `makeRadarHandles()` parameter — see
+[USB model](#usb-model-one-claimed-interface-paced-commands) below. If a capture comes back with 0
+sweep markers found, `pupradar_capture` prints a warning and the `.json` sidecar's
+`sweep_markers_found` field reads `0`; raise `--cmd-delay-us` and re-capture.
+
+## USB model: one claimed interface, paced commands
+
+The board has **two** processors, and this matters:
+
+- the **FX2LP USB chip**, which runs `SDR_USB_FW.hex`. The Cypress `0xA0` loader holds its
+  8051 in reset while writing, so it starts clean on every run.
+- a **separate radar MCU**, which holds the Tx/Rx/modulation/PLL state, tags sweeps, and
+  streams samples. The firmware download does **not** reset it — it free-runs with
+  whatever configuration it was last given until the board is power-cycled.
+
+Every MATLAB MEX entry point (`miniradarputdata`, `miniradargetdata`, `usbdownload`,
+`usbcheckchip`, `usbsetinterface1`, `usbfindendpoint`) constructs a fresh
+`CCyUSBDevice(NULL)`, performs **exactly one** operation, and destroys it. There is no
+persistent handle anywhere in the MATLAB stack. `Send_Basic_Parameter.m` and
+`Send_PLL_Sawtooth.m` contain no `pause()` — all the spacing between the 22 configuration
+words comes from that per-call open/enumerate/close cycle, which costs milliseconds to
+tens of milliseconds each.
+
+**That spacing is the only thing the per-call open/close actually buys**, and it is
+load-bearing. An earlier version of this tool pushed all 22 words back-to-back in a few
+hundred microseconds; the later words were silently dropped — **`E5` (Rx select) most
+reliably of all**, being the last basic-parameter word and immediately followed by 17 PLL
+writes. The symptom was that `--receiver Rx1` and `--receiver Rx4` produced identical
+captures: the front end kept its previous channel while the EP6 data path, unaffected,
+went on streaming live samples.
+
+So `--cmd-delay-us` (default 15000) reproduces the gap explicitly, on **one** persistently
+claimed interface:
+
+| Operation | MATLAB equivalent | Here |
+|---|---|---|
+| claim + select alternate setting 1 | `usbsetinterface1` | **once**, during bring-up |
+| each of the 22 config words | `miniradarputdata` | one 512 B bulk-OUT + `--cmd-delay-us` |
+| board-info request / read | `miniradarputdata(FA00)` + `miniradargetdata` | bulk-OUT then bulk-IN |
+| capture read | `miniradargetdata` | one logical transfer, split into ≤1 MiB chunks |
+| firmware download | `usbdownload` | one handle for all the `0xA0` control transfers |
+
+> **Do not** be tempted to open and close the device around each command to mimic the MEX
+> more literally. `libusb_release_interface` issues a `SET_INTERFACE` request — *"resetting
+> interface state to the first alternate setting"* — which flushes the FX2's EP2 FIFO and
+> destroys the command word before the 8051 consumes it. CyAPI's `~CCyUSBDevice` does no
+> such thing, which is why the same structure is safe in MATLAB and harmful here. The
+> `Session_configure_does_not_disturb_the_interface` test guards this.
+
+The capture read is chunked because libusb's synchronous API pins the whole request at
+once and usbfs limits that (`/sys/module/usbcore/parameters/usbfs_memory_mb`, 16 MB by
+default) — a ~50 MB capture asked for in one call returns `LIBUSB_ERROR_NO_MEM`.
 
 ## Output format
 

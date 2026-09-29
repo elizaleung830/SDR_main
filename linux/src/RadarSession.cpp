@@ -42,6 +42,18 @@ constexpr std::size_t kBoardInfoExposedBytes = 32;
 // and the kernel logs as a buffer overflow against the USB device.
 constexpr std::size_t kBulkPacketBytes = 512;
 
+// Largest single bulk-IN request. libusb's synchronous API submits the whole
+// request to the kernel at once rather than splitting it, and usbfs caps the
+// memory a process may pin for in-flight transfers — see
+// /sys/module/usbcore/parameters/usbfs_memory_mb, 16 MB by default. Asking for
+// a whole multi-megabyte capture in one call returns LIBUSB_ERROR_NO_MEM
+// immediately (hit at --num-sweeps 12800, a ~50 MB transfer). 1 MiB leaves
+// generous headroom under that cap while keeping the read loop cheap; it is a
+// whole multiple of kBulkPacketBytes, as every request must be.
+constexpr std::size_t kMaxBulkChunkBytes = 1024u * 1024u;
+static_assert(kMaxBulkChunkBytes % kBulkPacketBytes == 0,
+              "bulk chunk must be a whole number of max packets");
+
 /**
  * @brief Returns the current UTC wall-clock time as an ISO-8601 string.
  * @return Timestamp in the form "YYYY-MM-DDTHH:MM:SSZ" (second resolution).
@@ -60,6 +72,27 @@ std::string isoTimestampUtcNow() {
     return oss.str();
 }
 
+/**
+ * @brief Counts Tx1/Tx2 sweep-header marker words in a captured byte region.
+ *
+ * Mirrors the marker check in process_pi.m: interprets `data` as little-endian
+ * uint16 words and counts how many fall in [kTx1HeaderTag, kTx1HeaderTag+kAdcMax]
+ * or [kTx2HeaderTag, kTx2HeaderTag+kAdcMax]. Zero means the board never tagged a
+ * single sweep — a strong signal that a configuration command was dropped.
+ * @param data   Captured bytes (as handed to the IqSink).
+ * @param length Number of bytes in `data`; a trailing odd byte is ignored.
+ */
+std::size_t countSweepMarkers(const std::uint8_t* data, std::size_t length) {
+    std::size_t count = 0;
+    for (std::size_t i = 0; i + 1 < length; i += 2) {
+        const auto word = static_cast<std::uint16_t>(data[i] | (data[i + 1] << 8));
+        const bool is_tx1 = word >= kTx1HeaderTag && word <= kTx1HeaderTag + kAdcMax;
+        const bool is_tx2 = word >= kTx2HeaderTag && word <= kTx2HeaderTag + kAdcMax;
+        if (is_tx1 || is_tx2) ++count;
+    }
+    return count;
+}
+
 }  // namespace
 
 /**
@@ -71,10 +104,27 @@ RadarSession::RadarSession(IUsbBackend& usb, std::string firmware_hex_path)
     : usb_(usb), fw_path_(std::move(firmware_hex_path)) {}
 
 /**
- * @brief Packs an opcode/parameter pair into a 512-byte bulk-OUT packet and sends it to EP2.
+ * @brief Sends one command word to EP2, then waits for the MCU to act on it.
  *
- * The MCU interprets only the first 16-bit little-endian word (opcode | param << 8), but the
- * full 512-byte max-packet must be sent to avoid FX2LP framing issues observed on some hosts.
+ * Wire format is a direct port of miniradarputdata.cpp: one 512-byte bulk-OUT
+ * packet holding 256 little-endian repeats of `opcode << 8 | param`
+ * (miniradarputdata.cpp:21 hard-codes the 512-byte length).
+ *
+ * The USB *state* model is a port too, and a deliberate one. Every MEX call
+ * constructs and destroys its own CCyUSBDevice, but CyAPI does not touch the
+ * interface on either — `usbsetinterface1` selects alternate setting 1 exactly
+ * once during bring-up and the device stays there for the whole session. All the
+ * per-call open/close actually buys MATLAB is *time* between command words, so
+ * that is what cmd_delay_us_ reproduces, on one persistently claimed interface.
+ *
+ * Do NOT be tempted to open and close the device around each command to mimic
+ * the MEX more literally: libusb_release_interface sends a SET_INTERFACE request
+ * ("resetting interface state to the first alternate setting"), which flushes the
+ * FX2's EP2 FIFO. Bracketing each write that way discards the command word before
+ * the 8051 has consumed it — the front end then keeps its previous Tx/Rx setting
+ * while the EP6 data path goes on streaming live samples, which is exactly the
+ * "--receiver Rx1 and Rx4 produce identical captures" failure.
+ *
  * @param opcode    Command opcode byte (see pupradar::opcode namespace in Protocol.hpp).
  * @param parameter Command parameter byte (semantics depend on opcode).
  * @throws std::runtime_error if fewer bytes than the full 512-byte packet are transferred.
@@ -89,8 +139,8 @@ void RadarSession::sendCommand(std::uint8_t opcode, std::uint8_t parameter) {
             << "): short write " << std::dec << n << "/" << pkt.size();
         throw std::runtime_error(oss.str());
     }
-    // Give the MCU time to act on this command before the next one lands.
-    // See RadarSession::setCommandDelayUs for why this is not always zero.
+    // The gap MATLAB gets for free from its per-call CCyUSBDevice construction.
+    // See RadarSession::setCommandDelayUs.
     if (cmd_delay_us_ > 0) {
         std::this_thread::sleep_for(std::chrono::microseconds(cmd_delay_us_));
     }
@@ -163,6 +213,7 @@ void RadarSession::downloadFirmware() {
  *         kBoardInfoUsefulOffsetBytes + 2 bytes (less than 1 uint16 word).
  */
 void RadarSession::requestBoardInfo() {
+    // PUPradar_initiating.m:131-134 — miniradarputdata(FA00) then miniradargetdata.
     sendCommand(opcode::kBoardInfoRequest, 0x00);
     std::vector<std::uint8_t> buf(kBoardInfoReadBytes, 0);
     std::size_t n = usb_.bulkRead(kEpInBulk, buf.data(), buf.size(),
@@ -195,8 +246,24 @@ void RadarSession::requestBoardInfo() {
  *   2. Claim interface 0, set alternate setting 1 (benign if the descriptor lacks it).
  *   3. Download firmware via the Cypress 0xA0 loader (downloadFirmware()).
  *   4. Wait for the chip to detach and re-enumerate under one of post_fw_candidates.
- *   5. Claim interface 0 and set alternate setting 1 again (now required for bulk EPs).
+ *      (PUPradar_initiating.m has no equivalent wait — MATLAB re-opens "the first
+ *      Cypress device" fresh on every mex call — but the firmware download holds
+ *      one handle throughout, like usbdownload.cpp, so it must wait for the real
+ *      hardware re-enumeration that MATLAB's per-call opens happen to paper over.)
+ *   5. Claim interface 0 and select alternate setting 1 once, as usbsetinterface1
+ *      does; the interface is then left alone for the rest of the session.
  *   6. Request board info (requestBoardInfo()) — result available via lastBoardInfo().
+ *
+ * The retry itself mirrors PUPradarGUI.m:114-122, which calls
+ * PUPradar_initiating() twice unconditionally and then up to 5 more times in
+ * a while loop until the board info decodes — the full bring-up, firmware
+ * download included, not just the board-info request. (The standalone
+ * PUPradar_initiating.m script this file's comments otherwise track drops
+ * that retry and raises on the first failure; the actual GUI it was
+ * extracted from does not — this class follows the GUI here.) A board-info
+ * reply that still lacks FA05 after all attempts is only a warning, per
+ * PUPradar_initiating.m: "the endpoints are still valid, so acquisition may
+ * still work."
  *
  * @param post_fw_candidates Non-empty list of (VID, PID) pairs the chip may present after
  *                           the firmware boots. Tried in order until one opens or the timeout
@@ -212,9 +279,12 @@ void RadarSession::initialize(
     if (post_fw_candidates.empty()) {
         throw std::invalid_argument("Need at least one post-firmware VID/PID candidate");
     }
+    // Every operation after the firmware download reopens the device against
+    // these, the way each MEX call constructs a fresh CCyUSBDevice.
+    post_fw_ = post_fw_candidates;
 
-    // The bring-up handshake is unreliable, so retry it until the board info carries the FA05 signature.   
-    constexpr int kMaxInitAttempts = 7;  // GUI's 2 unconditional + 5 retries
+    // GUI's 2 unconditional attempts + 5 retries (PUPradarGUI.m:114-122).
+    constexpr int kMaxInitAttempts = 7;
     for (int attempt = 1; attempt <= kMaxInitAttempts; ++attempt) {
         std::fprintf(stderr, "[pupradar] init attempt %d/%d\n",
                      attempt, kMaxInitAttempts);
@@ -234,7 +304,8 @@ void RadarSession::initialize(
     }
     std::fprintf(stderr,
                  "[pupradar] WARNING: all %d init attempts failed to return a valid\n"
-                 "[pupradar]          FA05 board info.",
+                 "[pupradar]          FA05 board info. The endpoints are still valid,\n"
+                 "[pupradar]          so acquisition may still work.\n",
                  kMaxInitAttempts);
 }
 
@@ -251,16 +322,9 @@ void RadarSession::initialize(
 void RadarSession::attemptBringUp(
         const std::vector<IUsbBackend::VidPid>& post_fw_candidates,
         unsigned int reenum_timeout_ms) {
-    // Pre-firmware open
     usb_.open(kPreFirmwareVid, kPreFirmwarePid);
     std::fprintf(stderr, "[pupradar]   opened %04X:%04X\n",
                  kPreFirmwareVid, kPreFirmwarePid);
-
-    // Force the chip back to its power-on state before running the loader.
-    // NOTE: Firmware already running in FX2 RAM survives it.
-    std::fprintf(stderr, "[pupradar]   resetting USB connection\n");
-    usb_.resetDevice();
-    std::fprintf(stderr, "[pupradar]   reset done\n");
 
     usb_.claimInterface(kInterfaceNumber);
 
@@ -270,7 +334,7 @@ void RadarSession::attemptBringUp(
     try {
         usb_.setAltSetting(kInterfaceNumber, kAlternateSetting);
     } catch (const UsbError&) {
-        // Some unprogrammed FX2LP descriptors do not have alt 1; ignore here,
+        // Some unprogrammed FX2LP descriptors do not have alt 1; ignore here.
     }
 
     std::fprintf(stderr, "[pupradar]   downloading firmware…\n");
@@ -281,42 +345,13 @@ void RadarSession::attemptBringUp(
     usb_.reopenAfterRenumeration(post_fw_candidates.data(),
                                  post_fw_candidates.size(),
                                  reenum_timeout_ms);
+    // Claim and select alternate setting 1 ONCE, as usbsetinterface1 does, and
+    // then leave the interface alone for the rest of the session. Re-selecting
+    // it later would flush the FX2 endpoint FIFOs mid-configuration.
     usb_.claimInterface(kInterfaceNumber);
     usb_.setAltSetting(kInterfaceNumber, kAlternateSetting);
 
     requestBoardInfo();
-}
-
-/**
- * @brief Attaches to a board already running firmware, skipping the loader.
- *
- * Opens the post-firmware device, forces a USB re-enumeration, claims
- * interface 0 / alt 1, then reads board info. No firmware download.
- *
- * The re-enumeration is the point of doing this rather than just opening the
- * device: it puts the USB side back to a known state and drops whatever the
- * previous session left queued on the endpoints, without re-running the loader.
- *
- * @param vid Post-firmware Vendor ID.
- * @param pid Post-firmware Product ID.
- * @throws UsbError or std::runtime_error if the device cannot be opened, reset,
- *         claimed, or does not answer the board-info request.
- */
-void RadarSession::attachRunning(std::uint16_t vid, std::uint16_t pid) {
-    std::fprintf(stderr, "[pupradar] attaching to running device %04X:%04X "
-                         "(no firmware download)\n", vid, pid);
-    usb_.open(vid, pid);
-
-    std::fprintf(stderr, "[pupradar]   re-enumerating…\n");
-    usb_.resetDevice();
-    std::fprintf(stderr, "[pupradar]   re-enumeration done\n");
-
-    usb_.claimInterface(kInterfaceNumber);
-    usb_.setAltSetting(kInterfaceNumber, kAlternateSetting);
-    requestBoardInfo();
-    std::fprintf(stderr, "[pupradar] attached: %s\n",
-                 decodeBoardInfo(last_board_info_).valid
-                     ? "FA05 OK" : "no FA05 — is the board actually running firmware?");
 }
 
 /**
@@ -359,15 +394,14 @@ void RadarSession::configure(const CaptureConfig& cfg) {
  * @brief Records cfg.num_sweeps of IQ the way the GUI's Record button does.
  *
  * Follows PUPradarGUI.m:1831-1859 (Record), NOT the display loop at :203-248:
- *   1. configure() ONCE — basic parameters and PLL registers.
- *   1b. Drain cfg.drain_sweeps of stale FIFO content, then reconfigure. This has
- *      no GUI counterpart in Record itself; it stands in for the Start loop,
- *      which Record can only ever run after and which drains continuously.
+ *   1. configure() ONCE — basic parameters and PLL registers, paced by
+ *      cmd_delay_us_ so the MCU latches each word (see sendCommand).
  *   2. One logical transfer sized for the whole recording:
- *      NumSweeps = duration / sweep_time, then GUI line 2730's
+ *      cfg.num_sweeps straight from the caller (MATLAB's
+ *      handles.NumSweeps), then GUI line 2730's
  *      ceil((NumSweeps+40)*LASN*2*LANR*LANT/512)*512 + 4096 bytes. libusb may
  *      satisfy it in pieces; the config is never re-sent between them.
- *   4. Drop the leading 4096 stale-FIFO bytes (GUI line 2734) before the sink.
+ *   3. Drop the leading 4096 stale-FIFO bytes (GUI line 2734) before the sink.
  *
  * The device is deliberately not reconfigured during the transfer. Doing so
  * re-triggers the sweep generator mid-stream, which yields one live sweep per
@@ -440,17 +474,33 @@ CaptureMetadata RadarSession::captureIq(const CaptureConfig& cfg,
     // the remainder down is what keeps every request legal; the slack in `buf`
     // covers the case where the device answers with a partial packet and leaves
     // total_bytes off a 512-byte boundary.
-    const unsigned int transfer_timeout_ms =
-        static_cast<unsigned int>(expected_duration_s * 1000.0) + cfg.bulk_timeout_ms;
+    //
+    // Requests are also capped at kMaxBulkChunkBytes. libusb does NOT split a
+    // large synchronous request for us — it pins the whole thing at once — and
+    // usbfs limits how much memory a process may pin for in-flight transfers
+    // (/sys/module/usbcore/parameters/usbfs_memory_mb, 16 MB by default). A long
+    // capture asked for in one call fails immediately with LIBUSB_ERROR_NO_MEM.
+    //
+    // Each chunk gets a timeout scaled to how long the board needs to produce
+    // that many bytes, plus cfg.bulk_timeout_ms of slack, so a board that stops
+    // streaming mid-capture fails fast instead of stalling once per chunk on a
+    // whole-capture-sized timeout.
+    const double bytes_per_second =
+        static_cast<double>(bytes_per_sweep) / sweep_time_s;
     auto readCapture = [&](std::size_t& reads_out) -> std::size_t {
         std::size_t total = 0;
         while (total < capture_bytes) {
             const std::size_t remaining = capture_bytes - total;
             const std::size_t request =
-                (remaining / kBulkPacketBytes) * kBulkPacketBytes;
+                std::min((remaining / kBulkPacketBytes) * kBulkPacketBytes,
+                         kMaxBulkChunkBytes);
             if (request == 0) break;  // less than one packet left to ask for
+            const auto chunk_timeout_ms =
+                static_cast<unsigned int>(
+                    (static_cast<double>(request) / bytes_per_second) * 1000.0) +
+                cfg.bulk_timeout_ms;
             std::size_t got = usb_.bulkRead(kEpInBulk, buf.data() + total,
-                                             request, transfer_timeout_ms);
+                                             request, chunk_timeout_ms);
             ++reads_out;
             if (got == 0) break;  // device has nothing more to give
             total += got;
@@ -458,80 +508,36 @@ CaptureMetadata RadarSession::captureIq(const CaptureConfig& cfg,
         return total;
     };
 
-    // ---- 3. Configure, drain, reconfigure ----------------------------------
+    // ---- 3. Configure, then capture -----------------------------------------
     //
-    // configure() is sent ONCE per phase and the device is left alone for the
-    // whole timed transfer. An earlier implementation re-sent all 22 command
-    // packets before every 30 KB read, hundreds of times per capture;
-    // re-triggering the sweep generator mid-stream produced one live sweep per
-    // read followed by the mixer output decaying to DC. That stays fixed — the
-    // drain below happens strictly BEFORE the timed capture begins.
-    //
-    // Why the drain exists: the board free-runs into the EP6 FIFO regardless of
-    // whether the host reads it, so the first bytes of a cold configure-then-read
-    // are data produced under the PREVIOUS configuration. The fixed 4096-byte
-    // discard below is a preamble skip copied from GUI line 2734, not a flush —
-    // if more than that is queued, stale-config samples land in the capture, and
-    // on a short capture the whole file can predate the change. See
-    // CaptureConfig::drain_sweeps for why the GUI never hits this.
+    // configure() is sent ONCE — run_GetComplexData.m does the same, and an
+    // earlier implementation that re-sent all 22 packets before every 30 KB read
+    // re-triggered the sweep generator mid-stream, producing one live sweep per
+    // read followed by the mixer output decaying to DC. What makes the MCU
+    // actually latch those 22 words is the pacing in sendCommand().
     using clock = std::chrono::steady_clock;
 
     configure(cfg);
 
-    std::size_t drain_bytes = 0;
-    bool drain_completed = true;
-    if (cfg.drain_sweeps > 0) {
-        const std::size_t drain_target =
-            static_cast<std::size_t>(cfg.drain_sweeps) * bytes_per_sweep;
-        std::vector<std::uint8_t> scratch(kBulkPacketBytes * 64, 0);
-        const auto drain_deadline =
-            clock::now() + std::chrono::milliseconds(cfg.drain_timeout_ms);
-
-        while (drain_bytes < drain_target) {
-            if (clock::now() >= drain_deadline) {
-                drain_completed = false;
-                break;
-            }
-            const std::size_t remaining = drain_target - drain_bytes;
-            // Same whole-packet rule as the capture read: a bulk IN request that
-            // is not a multiple of the max packet size overflows the moment the
-            // device sends a full packet into a short remainder.
-            std::size_t request = std::min(scratch.size(), remaining);
-            request = (request / kBulkPacketBytes) * kBulkPacketBytes;
-            if (request == 0) break;  // less than one packet left to ask for
-
-            const std::size_t got = usb_.bulkRead(kEpInBulk, scratch.data(),
-                                                   request, cfg.bulk_timeout_ms);
-            drain_bytes += got;
-            if (got < request) break;  // short read — FIFO is empty, we are current
-        }
-        std::fprintf(stderr,
-                     "[pupradar] drained %zu bytes (%d sweeps requested)%s\n",
-                     drain_bytes, cfg.drain_sweeps,
-                     drain_completed ? "" : " — hit drain timeout");
-
-        // Reassert the parameters, as every iteration of the GUI's loop does.
-        // A command swallowed while stale data was still draining out would
-        // otherwise leave the capture on the old settings.
-        if (cfg.reconfigure_after_drain) {
-            configure(cfg);
-        }
-    }
-
     // ---- 4. The recording --------------------------------------------------
-    const auto t_start = clock::now();
-
-    // One logical transfer: libusb may satisfy a multi-megabyte bulk request in
-    // pieces, but the config is never re-sent between them.
+    //
+    // One logical transfer, as GetComplexData.m makes a single miniradargetdata
+    // call. libusb needs it split into bounded chunks (see kMaxBulkChunkBytes),
+    // but the config is never re-sent between them.
     std::size_t reads_done  = 0;
+    const auto t_start = clock::now();
     const std::size_t total_bytes = readCapture(reads_done);
     const auto t_done = clock::now();
 
     // Discard the stale FIFO preamble, as GUI line 2734
     // (RawData = double(RawData(2049:end))), then hand over the real samples.
     constexpr std::size_t kStalePreambleBytes = 2048 * 2;
+    std::size_t markers_found = 0;
     if (total_bytes > kStalePreambleBytes) {
-        sink(buf.data() + kStalePreambleBytes, total_bytes - kStalePreambleBytes);
+        const std::uint8_t* captured = buf.data() + kStalePreambleBytes;
+        const std::size_t   captured_len = total_bytes - kStalePreambleBytes;
+        markers_found = countSweepMarkers(captured, captured_len);
+        sink(captured, captured_len);
     }
 
     CaptureMetadata md;
@@ -552,9 +558,7 @@ CaptureMetadata RadarSession::captureIq(const CaptureConfig& cfg,
     md.bytes_captured           = total_bytes > kStalePreambleBytes
                                       ? total_bytes - kStalePreambleBytes : 0;
     md.reads_completed          = reads_done;
-    md.drain_sweeps_requested   = cfg.drain_sweeps;
-    md.drain_bytes_discarded    = drain_bytes;
-    md.drain_completed          = drain_completed;
+    md.sweep_markers_found      = markers_found;
     md.board_info_words         = last_board_info_;
     md.firmware_path            = fw_path_;
     md.timestamp_utc            = isoTimestampUtcNow();

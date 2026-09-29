@@ -24,40 +24,6 @@ struct CaptureConfig {
     /// implementations sized their transfers from different quantities.
     int             num_sweeps      = 128;
     unsigned int    bulk_timeout_ms = 2000;
-
-    /// Sweeps to read and discard between configure() and the real capture.
-    ///
-    /// The board free-runs into the EP6 FIFO whether or not the host reads, so
-    /// a cold configure-then-read returns data produced under the PREVIOUS
-    /// configuration — which is why a changed Rx mask appeared to take effect
-    /// only one or two runs later. The GUI never hits this: Record is
-    /// unreachable until Start has been pressed (PUPradarGUI.m:57 disables the
-    /// recorder panel, :195 is the only enable, immediately before the loop at
-    /// :203), and that loop re-sends the whole configuration and drains 64
-    /// sweeps (:244) continuously, so every Record follows a fresh drain by
-    /// milliseconds.
-    ///
-    /// Default 0 (off), because the standard bring-up now always downloads the
-    /// firmware, and the Cypress loader holds the 8051 in reset while it writes
-    /// (Protocol.hpp kCpucsReset). A reset MCU cannot have left stale sweeps in
-    /// the FIFO, so the drain has nothing to do. run_GetComplexData.m works for
-    /// exactly this reason: PUPradar_initiating downloads every run and never
-    /// drains. Set to 64 (the GUI's per-frame NumSweeps) if you ever acquire
-    /// without a preceding firmware download.
-    int             drain_sweeps    = 0;
-
-    /// Upper bound on the drain, in milliseconds. The drain stops early on a
-    /// short read (FIFO empty); this only bounds the pathological case of a
-    /// board that keeps handing back full packets forever.
-    unsigned int    drain_timeout_ms = 1000;
-
-    /// Re-send the configuration after draining, before the timed capture.
-    ///
-    /// The GUI's loop sends the full parameter set every iteration, so the
-    /// settings are always reasserted immediately before a Record. Cheap
-    /// insurance against a command that was swallowed while stale data was
-    /// still draining out.
-    bool            reconfigure_after_drain = true;
 };
 
 struct CaptureMetadata {
@@ -77,10 +43,11 @@ struct CaptureMetadata {
     // What we measured
     std::size_t     bytes_captured;
     std::size_t     reads_completed;
-    // Pre-capture drain: what was configured, and what it actually discarded.
-    int             drain_sweeps_requested = 0;
-    std::size_t     drain_bytes_discarded  = 0;
-    bool            drain_completed        = false;  // false = hit the timeout
+    // Count of Tx1/Tx2 sweep-header marker words found in the captured region
+    // (see Protocol.hpp kTx1HeaderTag/kTx2HeaderTag). Zero means the board
+    // never tagged a single sweep — almost always a dropped configuration
+    // command rather than a hardware fault; see RadarSession::setCommandDelayUs.
+    std::size_t     sweep_markers_found = 0;
     // Board info from 0xFA00 response (raw, host-byte-order uint16 dump,
     // first 16 16-bit words from the info region — let user verify modelcode)
     std::vector<std::uint16_t> board_info_words;
@@ -101,18 +68,17 @@ public:
     RadarSession(IUsbBackend& usb, std::string firmware_hex_path);
 
     /// Full bring-up: enumerate (pre-firmware), claim, download firmware,
-    /// wait for re-enumeration, claim again, request board info.
+    /// wait for re-enumeration, claim again, request board info. Retried up
+    /// to 7 times if the board info doesn't carry the FA05 signature — this
+    /// mirrors PUPradarGUI.m:114-122, which calls PUPradar_initiating() twice
+    /// unconditionally and then up to 5 more times in a while loop before
+    /// giving up. (The standalone PUPradar_initiating.m script drops this
+    /// retry and just raises on the first failure; the GUI it was extracted
+    /// from does not.)
     /// @param post_fw_candidates List of (vid,pid) the chip may take after firmware load.
     /// Throws UsbError or std::runtime_error on failure.
     void initialize(const std::vector<IUsbBackend::VidPid>& post_fw_candidates,
                     unsigned int reenum_timeout_ms = 5000);
-
-    /// Attach to a board that is already running firmware: open, claim, set alt,
-    /// request board info. No firmware download and no re-enumeration.
-    ///
-    /// @param vid,pid The post-firmware VID/PID the running board presents.
-    /// @throws UsbError if the device cannot be opened or claimed.
-    void attachRunning(std::uint16_t vid, std::uint16_t pid);
 
     /// Apply a configuration: send modulation/sweep/sampling/Tx/Rx and PLL regs.
     void configure(const CaptureConfig& cfg);
@@ -125,11 +91,13 @@ public:
     /// Power-down convenience: release interfaces, close device.
     void shutdown();
 
-    /// Settling delay inserted after every command packet, in microseconds.
+    /// Extra settling delay inserted after every command packet, in microseconds.
     ///
-    /// The MCU needs a moment to act on a command before the next one lands;
-    /// back-to-back writes on a fast host can outrun it. Default 0 (no delay) —
-    /// raise it if the board ignores parameters or returns filler data.
+    /// Supplemental only. Each command already gets its own full USB device
+    /// open/claim/transfer/close cycle (mirroring miniradarputdata.cpp), and
+    /// that cycle is the primary thing giving the MCU time to latch a command
+    /// before the next one arrives. Raise this if the board still ignores a
+    /// parameter — i.e. if a capture comes back with sweep_markers_found == 0.
     void setCommandDelayUs(unsigned int us) { cmd_delay_us_ = us; }
     unsigned int commandDelayUs() const { return cmd_delay_us_; }
 
@@ -149,6 +117,14 @@ private:
     std::string                fw_path_;
     std::vector<std::uint16_t> last_board_info_;
     unsigned int               cmd_delay_us_ = 0;
+    /// VID/PID the board presents once its firmware is running. Every
+    /// post-bring-up operation reopens the device against this list, the way
+    /// each MEX call constructs a fresh CCyUSBDevice. initialize() overwrites
+    /// it with the candidates it was given; the default is what the board
+    /// actually presents today, so callers that skip initialize() (tests, and
+    /// any direct configure()/captureIq() use) still work.
+    std::vector<IUsbBackend::VidPid> post_fw_{
+        {kPreFirmwareVid, kPreFirmwarePid}};
 };
 
 }  // namespace pupradar

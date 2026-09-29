@@ -34,10 +34,8 @@ Deployed. On the Pi, install the udev rule once:
 
 Then test:
     cd $DEST
-    ./pupradar_capture --duration 5 --out /tmp/cap
+    ./pupradar_capture --out /tmp/cap
 
-After the first run, find the post-firmware VID/PID with 'lsusb' and pass
-them on subsequent runs:
-    ./pupradar_capture --post-fw-vid 0x04B4 --post-fw-pid 0xXXXX \\
-                       --duration 5 --out /tmp/cap
+If the capture fails at re-enumeration, find the post-firmware VID/PID with
+'lsusb', update the 'post_fw' constant in main.cpp to match, and rebuild.
 EOF

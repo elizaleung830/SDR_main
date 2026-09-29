@@ -56,5 +56,5 @@
   "C_Cpp_Runner.showCompilationTime": false,
   "C_Cpp_Runner.useLinkTimeOptimization": false,
   "C_Cpp_Runner.msvcSecureNoWarnings": false,
-  "cmake.sourceDirectory": "/home/leung/Desktop/Eliza SDR/SDR_main/linux"
+  "cmake.sourceDirectory": "/home/leung/Desktop/Eliza_SDR/SDR_main/linux"
 }

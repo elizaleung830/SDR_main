@@ -38,11 +38,6 @@ public:
     /// Set alternate interface setting on the currently-claimed interface.
     virtual void setAltSetting(int interface_number, int alt_setting) = 0;
 
-    /// Issue a USB port reset, returning the chip to its power-on state.
-    /// The device may re-enumerate as a side effect; implementations must
-    /// leave a usable handle open on the same VID/PID when it does.
-    virtual void resetDevice() = 0;
-
     /// Vendor-specific control transfer (request type 0x40 OUT or 0xC0 IN).
     /// Returns the number of bytes transferred.
     virtual std::size_t controlTransfer(std::uint8_t  bm_request_type,

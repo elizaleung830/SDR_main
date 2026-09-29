@@ -25,6 +25,13 @@ constexpr std::uint8_t  kFwLoaderRequest = 0xA0;
 constexpr std::uint16_t kCpucsRegister   = 0xE600;
 constexpr std::uint8_t  kCpucsReset      = 0x01;  // bit 0: 1=hold reset, 0=run
 
+// Sweep-header tag bits the firmware ORs into the first word of each sweep
+// (GetComplexData.m / process_pi.m). A word in [tag, tag+kAdcMax] is a
+// tagged marker; subtracting the tag recovers the underlying ADC sample.
+constexpr std::uint16_t kTx1HeaderTag = 49152;  // 0xC000
+constexpr std::uint16_t kTx2HeaderTag = 32768;  // 0x8000
+constexpr std::uint16_t kAdcMax       = 4095;   // 12-bit ADC
+
 // Outbound command opcodes (high byte of the 16-bit command word)
 namespace opcode {
 constexpr std::uint8_t kBoardInfoRequest = 0xFA;  // param 0x00

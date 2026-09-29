@@ -1,9 +1,10 @@
-filename="C:\Users\eliza\OneDrive\Desktop\SDR_Measurement_uni\SDR_main\data\01092026_matlab\0109_2GHz_128_0-5ms_loopback.mat";
-filename_pi = "D:\0109_pi\0109_2GHz_128_0-5ms_loopback_rx4.bin";
-sampSize=128;
+clear;
+filename="/home/leung/Desktop/Eliza_SDR/SDR_main/data/10092026/matlab/1009_2GHz_1024_0-5ms_loopback.mat";
+filename_pi = "/home/leung/Desktop/Eliza_SDR/SDR_main.worktrees/main/data/test.bin";
+sampSize=1024;
 T_sweep=0.5e-3;
 BW=2e9;
-display_sweep=300;
+display_sweep=100;
 [raw, I, Q, freqAxis, rangeAxis, avgSpectrum] = process_matlab(filename, sampSize, T_sweep, BW);
 [raw_pi, I_pi, Q_pi, freqAxis_pi, rangeAxis_pi, avgSpectrum_pi] = process_pi(filename_pi, sampSize, T_sweep, BW);
 
