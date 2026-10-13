@@ -3,12 +3,13 @@ clear;
 c = 3e8;                % Speed of light (m/s)
 f_start = 24e9;         % Start frequency (Hz)
 f_end = 26e9;         % Start frequency (Hz)
+f_samp = 256000;       % sampling frequency of the beat signal (Hz)
 B = f_end-f_start;              % Sweep bandwidth (Hz)
 T_sweep = 1e-3;         % Sweep time (s)
-R = 20000;                 % Target range (m)
+R = 10;                 % Target range (m)
 Num_sweeps =5;
 fs = 2 * B;
-N = T_sweep*fs;
+D = fs / f_samp; 
 
 % Derived parameters
 S = B / T_sweep;        % Frequency slope (Hz/s)
@@ -34,41 +35,60 @@ t_full = (0:length(tx)-1) / fs;
 I_channel = real(iq_signal);
 Q_channel = imag(iq_signal);
 
-% FFT Processing
-[rangeAxis, rangePower] = plotRangeProfileRaw(iq_signal, Num_sweeps, fs, T_sweep, B, N, 3);
+% Down sample to the output 
+I_beat = downsample(I_channel, D);
+Q_beat = downsample(Q_channel, D);
+IQ_beat = I_beat + Q_beat*1j;
+t_beat = downsample(t_full, D);
+
 
 % Plot
 figure;
 subplot(3,1,1);
 phase_tx = unwrap(angle(tx));
 inst_freq_tx = [0, diff(phase_tx)] .* fs / (2*pi); 
-plot(t_full, inst_freq_tx/1e9);
+plot(t_full*  1e3, inst_freq_tx/1e9);
 hold on
-phase_rx = unwrap(angle(rx));
-inst_freq_rx = [0, diff(phase_rx)] .* fs / (2*pi); 
-plot(t_full, inst_freq_rx/1e9);
+% phase_rx = unwrap(angle(rx));
+% inst_freq_rx = [0, diff(phase_rx)] .* fs / (2*pi); 
+% plot(t_full, inst_freq_rx/1e9);
 
-xlabel('Time(t)');
+xlabel('Time (ms)');
 ylabel('Frequency (GHz)');
-
-title("tx and rx freq slope");
+title("Freqeuncy transmitted by Tx channel of the radar");
 grid on;
+
+
 
 subplot(3,1,2);
-Nfft = length(iq_signal);
-f_axis = (0:Nfft-1) * (fs/Nfft);
-X = abs(fft(iq_signal));
-plot(f_axis, X);
-xlabel('frequency');
+% Nfft = length(iq_signal);
+% f_axis = (0:Nfft-1) * (fs/Nfft);
+% X = abs(fft(iq_signal));
+% plot(f_axis, X);
+subplot(3,1,2);
+plot(t_beat*  1e3, I_beat, 'LineWidth', 1.2);
+hold on;
+plot(t_beat*  1e3, Q_beat, '--', 'LineWidth', 1.2);
+hold off;
+xlim([0, T_sweep/2 *  1e3]);
+xlabel('Time (ms)');
 ylabel('Amplitude');
-
-title("IQ signal");
+legend('I (in-phase)', 'Q (quadrature)', 'Location', 'northeast');
+title(sprintf('I and Q signals collected by the radar (sampled at %d Hz)', f_samp));
 grid on;
+
+% FFT Processing
+grid on;
+N = round(T_sweep * f_samp);      
+[rangeAxis, rangePower] = plotRangeProfileRaw(IQ_beat, Num_sweeps, f_samp, T_sweep, B, N, 3);
+R_max = f_samp * c / (2*S);
 
 subplot(3,1,3);
 plot(rangeAxis, rangePower);
 xlabel('Range (m)');
 ylabel('Amplitude');
-xlim([0, R*10]);
-title(['FMCW Range Detection of a Perfect Reflector ', R, "m away (plotRangeProfileRaw)"]);
+xlim([0, R_max]);
+ylim([0, max(rangePower)+10])
+title_str = sprintf('FMCW Range Detection of a Perfect Reflector %d m away', R);
+title(title_str);
 grid on;

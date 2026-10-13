@@ -16,7 +16,9 @@ function [raw, I_out, Q_out, freqAxis, rangeAxis, avgSpectrum] = process_matlab(
 
     %% Constants
     c      = 3e8;
-    fs     = sampSize / T_sweep / 2;   % sampling frequency
+    % Empirically, the factor of 2 in fs will give correct result. Still
+    % not 100% sure whty
+    fs     = sampSize / T_sweep /2 ;   
     fftSize = sampSize;
 
         %% Load data — .mat (GUI export) or raw text
@@ -34,11 +36,7 @@ function [raw, I_out, Q_out, freqAxis, rangeAxis, avgSpectrum] = process_matlab(
         Iq_sweeps = iqMat;                          % already [LASN*LANR x numSweeps]
         I_out     = real(iqMat);
         Q_out     = imag(iqMat);
-        % override caller args with what the GUI actually used, if present
-        if isfield(S, 'LASN'), sampSize = 2 * S.LASN; fftSize = sampSize; end
-        if isfield(S, 'LAST'), T_sweep  = S.LAST;  end
-        if isfield(S, 'LAFL') && isfield(S, 'LAFH'), BW = S.LAFH - S.LAFL; end
-        fs = sampSize / T_sweep / 2;
+
     end
           % remove first 40 lines of metadata
 
@@ -54,7 +52,8 @@ function [raw, I_out, Q_out, freqAxis, rangeAxis, avgSpectrum] = process_matlab(
 
     %% Build frequency and range axes
     freqBinWidth = fs / fftSize;
-    freqAxis     = (0:fftSize-1) * freqBinWidth; % [1 x fftSize]
-    rangeAxis    = freqAxis * T_sweep / (2 * BW) * c; % [1 x fftSize]
+    freqAxis     = (0:fftSize/2-1) * freqBinWidth; % [1 x fftSize] keep positive bin only
+    rangeAxis    = freqAxis * T_sweep / (2 * BW) * c; % [1 x fftSize]'
+    avgSpectrum = avgSpectrum(1:fftSize/2);
 
 end

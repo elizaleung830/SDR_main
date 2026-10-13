@@ -50,9 +50,10 @@ function [raw, I_out, Q_out, freqAxis, rangeAxis, avgSpectrum, ComplexDataTx1, i
         sampSize = []
         T_sweep  = []
         BW       = []
-        opts.MaxSweeps (1,1) double  = Inf
-        opts.FFTSize   (1,1) double  = 0
         opts.Verbose   (1,1) logical = true
+        opts.butterworth logical = false
+        opts.iq_status string = "raw"
+        opts.trim logical = false
     end
 
     c       = 3e8;
@@ -104,9 +105,6 @@ function [raw, I_out, Q_out, freqAxis, rangeAxis, avgSpectrum, ComplexDataTx1, i
         error('process_pi:NoWholeSweep', ...
               'No complete sweep of %d words found in %s.', strideWords, filename);
     end
-    if isfinite(opts.MaxSweeps) && numel(starts) > opts.MaxSweeps
-        starts = starts(1:opts.MaxSweeps);
-    end
 
     %% 5. Gather the sweeps — one column each, aligned to its own marker
     idx    = starts(:).' + (0:strideWords-1).';   % [strideWords x numSweeps]
@@ -130,19 +128,36 @@ function [raw, I_out, Q_out, freqAxis, rangeAxis, avgSpectrum, ComplexDataTx1, i
     ComplexDataTx1 = I_out + 1i * Q_out;
 
     complexPerSweep = strideWords / 2;   % == LASN when the device obeyed
-    fs              = complexPerSweep / T_sweep;
-    if opts.FFTSize > 0
-        fftSize = opts.FFTSize;
-    else
-        fftSize = complexPerSweep;
-    end
+    fs              = complexPerSweep / T_sweep /2;
+    fftSize = complexPerSweep;
+
 
     Iq_sweeps = ComplexDataTx1;
 
     %% ---- processing below is unchanged ----
+    
+    %% butterworth filter
+    if opts.butterworth == true
+        [b, a] = butter(4, [0.04, 0.85]);
+        Iq_sweeps = filter(b, a, Iq_sweeps);
+    end
 
-    %% DC offset removal
-    Iq_sweeps = Iq_sweeps - mean(Iq_sweeps, 'all');
+    %% Trimming non-linear part
+    if opts.trim == true
+         Iq_sweeps = Iq_sweeps(sampSize/4+1: sampSize*3/4, :);
+         [nRows, nCols] = size(Iq_sweeps);
+         tmp = complex(zeros(nRows*2, nCols));
+         for k = 1:nCols
+             tmp(:,k) = interp(real(Iq_sweeps(:,k)), 2) + 1i*interp(imag(Iq_sweeps(:,k)), 2);
+         end
+        Iq_sweeps = tmp;
+        fs = fs*2;
+    end
+
+     if opts.iq_status == "filtered"
+         I_out= real(Iq_sweeps);
+         Q_out= imag(Iq_sweeps);
+     end
 
     %% Range FFT across each sweep (column-wise)
     rangefft_all = fft(Iq_sweeps, fftSize, 1);   % [fftSize x numSweeps]
@@ -153,8 +168,9 @@ function [raw, I_out, Q_out, freqAxis, rangeAxis, avgSpectrum, ComplexDataTx1, i
 
     %% Build frequency and range axes
     freqBinWidth = fs / fftSize;
-    freqAxis     = (0:fftSize-1) * freqBinWidth; % [1 x fftSize]
+    freqAxis     = (0:fftSize/2-1) * freqBinWidth; % [1 x fftSize]
     rangeAxis    = freqAxis * T_sweep / (2 * BW) * c; % [1 x fftSize]
+    avgSpectrum = avgSpectrum(1:fftSize/2);
 
     %% Report what was kept and what was thrown away
     wordsUsed = numel(raw);
